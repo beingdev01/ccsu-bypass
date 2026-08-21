@@ -147,6 +147,7 @@ That's the whole thing. Everything past here is reference and tuning.
 | `doctor.sh` | **Layered diagnostics.** Run on the VPS or a client; the first failing check tells you exactly which layer is broken. `npm run doctor` |
 | `healthcheck.sh` | **Self-healing watchdog** (installed as a 3-min systemd timer): proves a real WebSocket `101`, restarts/renews on failure. |
 | `add-device.sh` | Add or revoke a device on the running server, no downtime. `sudo ./add-device.sh` |
+| `CLIENT-TUNING.md` | **Per-app client latency settings** (v2rayNG / sing-box / Hiddify) — DNS defaults that add 100–250 ms, and how to read a "real delay" number. |
 | `TESTING.md` | Isolated-lab test report: DPI/fingerprint, security, latency, 8-device concurrency, and the vulnerabilities found. |
 
 ---
