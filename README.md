@@ -15,12 +15,8 @@ your device (uTLS Chrome)  --HTTPS/WSS 443-->  firewall  -->  your VPS (Xray, re
         SOCKS 127.0.0.1:2080        looks like normal browsing            terminates TLS, unwraps VLESS
 ```
 
-> ⚠️ **Domain note:** the default domain here is `vpn.codecriet.dev` (as you
-> gave it). Your engineering writeup uses `vpn.codescriet.dev` (with an **s**).
-> These are different domains — a wrong one means the cert won't issue and
-> nothing connects. Everything is driven by the `DOMAIN` env var, so set it to
-> whichever you actually own. Change it in **one place** (the command line) and
-> it flows through the server, the cert, and the share link.
+Default domain: **`vpn.codescriet.dev`**. Everything is `DOMAIN`-driven, so you
+can point it at any record you control.
 
 ---
 
@@ -28,64 +24,65 @@ your device (uTLS Chrome)  --HTTPS/WSS 443-->  firewall  -->  your VPS (Xray, re
 
 | File | Purpose |
 |---|---|
-| `setup.sh` | One-shot VPS bootstrap: packages, firewall, Let's Encrypt cert, Xray config, systemd service, renewal hook. |
+| `setup.sh` | **One-command installer.** Interactive: installs deps, verifies DNS, opens ports, gets the cert, tunes latency, writes every file, starts the service, prints link + QR. |
 | `index.js` | Generates the VLESS+WS+TLS Xray config and runs Xray (arch-aware download). Used by `npm start` for manual runs. |
 | `gen-client.js` | Prints the VLESS share link and writes a `sing-box` client config. `npm run client`. |
 | `latency-check.sh` | Run from a client to measure the raw floor vs. tunnel overhead and confirm the 14–25 ms target is reachable. |
 
 ---
 
-## Before you touch the VPS (console steps)
+## Deploy — one command
 
-1. **Cloudflare DNS** — add an `A` record:
+Two things can't be done from inside the box (they're in web consoles), so do
+them first:
 
-   | Type | Name | Content | Proxy |
-   |---|---|---|---|
-   | A | `vpn` | *your VPS public IP* | **DNS only (grey cloud)** |
+1. **Cloudflare DNS** — add `A` record `vpn` → *your VPS public IP*, set to
+   **DNS only (grey cloud)**. Grey = direct = best ping + full-duplex unlimited
+   up/down. (The installer checks this for you and won't proceed until the
+   record points at the VPS.)
+2. **Oracle VCN Security List / NSG** — add **Ingress** rules from `0.0.0.0/0`
+   for TCP **443** and TCP **80** (80 is only for the cert challenge/renewals).
+   The installer handles the *OS* firewall itself; this VCN layer is separate.
 
-   Grey cloud = direct connection = ~60 ms (best for gaming). Orange/proxied
-   (CDN) also works but adds ~200–400 ms — see *Cloudflare modes* below.
-
-2. **Oracle VCN Security List / NSG** — add **Ingress** rules from `0.0.0.0/0`:
-   - TCP **443** (the proxy)
-   - TCP **80** (only for the cert challenge + renewals)
-
-   This is the layer people forget — the OS firewall is separate and `setup.sh`
-   handles that part for you.
-
----
-
-## Deploy (on the VPS)
-
-Oracle "Always Free" boxes are fine here — the 1 GB `E2.1.Micro` (AMD) or an ARM
-`A1.Flex` slice both work; Xray idles at ~20–40 MB RAM. `setup.sh` auto-detects
-x86_64 vs ARM.
+Then, on the VPS:
 
 ```bash
 git clone https://github.com/beingdev01/ccsu-bypass.git
 cd ccsu-bypass
-
-sudo DOMAIN=vpn.codecriet.dev \
-     UUID=$(cat /proc/sys/kernel/random/uuid) \
-     ./setup.sh
+bash setup.sh          # re-runs itself with sudo; asks for anything it needs
 ```
 
-The script installs everything, obtains the certificate, starts Xray under
-systemd, and prints your **UUID** and a ready-to-import **VLESS share link**.
-Save both.
+That's it. The installer:
 
-**Self-test from the VPS** (a plain GET to the WS path should return `400` —
-that is Xray correctly rejecting a non-WebSocket request):
+- re-execs with `sudo`, installs every dependency (`curl`, `certbot`, `xray`,
+  `qrencode`, …),
+- **prompts** for domain / port / path (sensible defaults — just press Enter)
+  and **auto-generates your UUID**,
+- **auto-detects the public IP** and **verifies DNS** points at it (loops with
+  the exact record to create until it does),
+- opens ports 80 + the TLS port in the host firewall,
+- obtains the Let's Encrypt certificate,
+- applies the low-latency tuning (BBR, `tcpNoDelay`, TCP Fast Open),
+- writes `/etc/xray/config.json`, installs the systemd service, and installs the
+  cert-renewal hook,
+- self-tests, saves everything to `credentials.txt`, and prints the **share
+  link + a scannable QR code**.
+
+Fully non-interactive (e.g. for automation) — pass everything as env vars:
 
 ```bash
-curl -sk https://vpn.codecriet.dev/cdn -o /dev/null -w '%{http_code}\n'   # -> 400
+sudo DOMAIN=vpn.codescriet.dev UUID=$(cat /proc/sys/kernel/random/uuid) bash setup.sh
 ```
+
+Oracle "Always Free" boxes are fine — the 1 GB `E2.1.Micro` (AMD) or an ARM
+`A1.Flex` slice both work; Xray idles at ~20–40 MB RAM, and the installer
+auto-detects x86_64 vs ARM.
 
 ### Manual run (testing, no systemd)
 
 ```bash
 export UUID=<your-uuid>
-export DOMAIN=vpn.codecriet.dev
+export DOMAIN=vpn.codescriet.dev
 sudo -E npm start        # sudo: binds :443. Needs the cert from setup.sh first.
 ```
 
@@ -96,7 +93,7 @@ sudo -E npm start        # sudo: binds :443. Needs the cert from setup.sh first.
 Generate the share link + macOS/Linux config any time:
 
 ```bash
-DOMAIN=vpn.codecriet.dev UUID=<your-uuid> npm run client
+DOMAIN=vpn.codescriet.dev UUID=<your-uuid> npm run client
 ```
 
 - **Android** — v2rayNG → `+` → *Import config from clipboard* → paste link → connect.
@@ -109,7 +106,7 @@ DOMAIN=vpn.codecriet.dev UUID=<your-uuid> npm run client
 The link looks like:
 
 ```
-vless://<uuid>@vpn.codecriet.dev:443?encryption=none&security=tls&sni=vpn.codecriet.dev&fp=chrome&type=ws&host=vpn.codecriet.dev&path=%2Fcdn#CCSU-Bypass
+vless://<uuid>@vpn.codescriet.dev:443?encryption=none&security=tls&sni=vpn.codescriet.dev&fp=chrome&type=ws&host=vpn.codescriet.dev&path=%2Fcdn#CCSU-Bypass
 ```
 
 ---
@@ -160,7 +157,7 @@ network stack is tuned for interactive latency rather than throughput fairness.
 **Verify the real floor** (run from the campus client, e.g. the Mac):
 
 ```bash
-DOMAIN=vpn.codecriet.dev VPS_IP=<your-vps-ip> ./latency-check.sh
+DOMAIN=vpn.codescriet.dev VPS_IP=<your-vps-ip> ./latency-check.sh
 ```
 
 It reports the **raw TCP handshake** time to the VPS (the floor) and the
@@ -189,7 +186,7 @@ the tunnel.
 
 | Var | Default | Notes |
 |---|---|---|
-| `DOMAIN` | `vpn.codecriet.dev` | Must be a domain you control and pointed at this VPS. |
+| `DOMAIN` | `vpn.codescriet.dev` | Must be a domain you control and pointed at this VPS. |
 | `UUID` | *(built-in — do not use in prod)* | Your client secret. Generate with `cat /proc/sys/kernel/random/uuid`. |
 | `PORT` | `443` | TLS listen port. Keep 443 — least likely to be blocked. |
 | `WS_PATH` | `/cdn` | WebSocket path; must match on client and server. |

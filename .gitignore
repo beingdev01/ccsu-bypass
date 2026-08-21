@@ -2,6 +2,7 @@
 xray
 xray.zip
 config.json
+credentials.txt
 client-singbox.json
 *.pem
 node_modules/

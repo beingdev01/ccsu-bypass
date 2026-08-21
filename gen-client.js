@@ -2,7 +2,7 @@
  * gen-client.js — print a VLESS share link and write a sing-box client config.
  *
  *   node gen-client.js
- *   DOMAIN=vpn.codecriet.dev UUID=<uuid> node gen-client.js
+ *   DOMAIN=vpn.codescriet.dev UUID=<uuid> node gen-client.js
  *
  * The share link imports into v2rayNG (Android), v2rayN (Windows),
  * Hiddify / V2Box (iOS), Nekobox, etc. The sing-box JSON is for macOS/Linux.
@@ -10,7 +10,7 @@
 const fs = require('fs');
 
 const UUID    = process.env.UUID    || '49189805-e1ed-4627-820a-806adb82c169';
-const DOMAIN  = process.env.DOMAIN  || 'vpn.codecriet.dev';
+const DOMAIN  = process.env.DOMAIN  || 'vpn.codescriet.dev';
 const PORT    = parseInt(process.env.PORT || '443', 10);
 const WS_PATH = process.env.WS_PATH || '/cdn';
 const SOCKS   = parseInt(process.env.SOCKS_PORT || '2080', 10);

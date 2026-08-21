@@ -11,7 +11,7 @@
  *
  * Everything is configurable via environment variables:
  *   UUID       client secret (REQUIRED in production — do not use the default)
- *   DOMAIN     the domain the cert is for (default: vpn.codecriet.dev)
+ *   DOMAIN     the domain the cert is for (default: vpn.codescriet.dev)
  *   PORT       TLS listen port                (default: 443)
  *   WS_PATH    WebSocket path                 (default: /cdn)
  *   CERT_FILE  fullchain.pem path             (default: LE path for DOMAIN)
@@ -26,7 +26,7 @@ const os = require('os');
 const path = require('path');
 
 const UUID    = process.env.UUID    || '49189805-e1ed-4627-820a-806adb82c169';
-const DOMAIN  = process.env.DOMAIN  || 'vpn.codecriet.dev';
+const DOMAIN  = process.env.DOMAIN  || 'vpn.codescriet.dev';
 const PORT    = parseInt(process.env.PORT || '443', 10);
 const WS_PATH = process.env.WS_PATH || '/cdn';
 const CERT_FILE = process.env.CERT_FILE || `/etc/letsencrypt/live/${DOMAIN}/fullchain.pem`;

@@ -12,11 +12,11 @@
 # geography/routing, not the proxy — no config change fixes it.
 #
 # Usage:
-#   DOMAIN=vpn.codecriet.dev VPS_IP=<ip> ./latency-check.sh
+#   DOMAIN=vpn.codescriet.dev VPS_IP=<ip> ./latency-check.sh
 #   (SOCKS defaults to 127.0.0.1:2080 — the sing-box/xray client port.)
 set -u
 
-DOMAIN="${DOMAIN:-vpn.codecriet.dev}"
+DOMAIN="${DOMAIN:-vpn.codescriet.dev}"
 VPS_IP="${VPS_IP:-}"
 SOCKS="${SOCKS:-127.0.0.1:2080}"
 PORT="${PORT:-443}"
