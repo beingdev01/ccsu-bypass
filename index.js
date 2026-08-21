@@ -71,20 +71,21 @@ const config = {
         },
         wsSettings: { path: WS_PATH },
         // Latency tuning for the client<->VPS leg:
-        //   tcpNoDelay  -> disable Nagle so small interactive/game packets
-        //                  are sent immediately instead of being buffered.
-        //   tcpcongestion=bbr -> low-latency congestion control (module loaded
-        //                  and enabled system-wide by setup.sh).
-        // NOTE: TCP Fast Open is deliberately NOT used. Chrome disabled it by
-        // default, so it makes us LESS browser-like, and some middleboxes drop
-        // SYN packets carrying payload outright.
-        sockopt: { tcpNoDelay: true, tcpcongestion: 'bbr' }
+        //   tcpCongestion=bbr -> low-latency congestion control. NOTE the
+        //     capital C: xray silently ignores unknown sockopt keys, so a
+        //     mis-cased name is a no-op that still passes `xray -test`.
+        //   Nagle is NOT set here: there is no tcpNoDelay sockopt in xray, and
+        //     Go's net stack already enables TCP_NODELAY on every connection.
+        //   TCP Fast Open is deliberately NOT used: Chrome disabled it by
+        //     default, so it would make us LESS browser-like, and some
+        //     middleboxes drop SYN packets carrying payload.
+        sockopt: { tcpCongestion: 'bbr' }
       }
     }
   ],
   outbounds: [
-    // Same no-Nagle treatment on the VPS<->destination leg.
-    { protocol: 'freedom', tag: 'direct', streamSettings: { sockopt: { tcpNoDelay: true, tcpcongestion: 'bbr' } } },
+    // Same congestion control on the VPS<->destination leg.
+    { protocol: 'freedom', tag: 'direct', streamSettings: { sockopt: { tcpCongestion: 'bbr' } } },
     { protocol: 'blackhole', tag: 'block' }
   ]
 };

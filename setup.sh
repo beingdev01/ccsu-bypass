@@ -232,7 +232,7 @@ rm -rf "$TMP"
 ok "xray -> $(/usr/local/bin/xray version 2>/dev/null | head -n1)"
 
 # ---- 8. low-latency kernel/network tuning -----------------------------------
-info "Applying low-latency network tuning (BBR, fq, no-Nagle)..."
+info "Applying low-latency network tuning (BBR, fq, buffers)..."
 modprobe tcp_bbr 2>/dev/null || true
 echo 'tcp_bbr' > /etc/modules-load.d/bbr.conf 2>/dev/null || true
 cat > /etc/sysctl.d/99-ccsu-latency.conf <<'SYSCTL'
@@ -282,12 +282,12 @@ cat > /etc/xray/config.json <<JSON
           ]
         },
         "wsSettings": { "path": "${WS_PATH}" },
-        "sockopt": { "tcpNoDelay": true, "tcpcongestion": "bbr" }
+        "sockopt": { "tcpCongestion": "bbr" }
       }
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct", "streamSettings": { "sockopt": { "tcpNoDelay": true, "tcpcongestion": "bbr" } } },
+    { "protocol": "freedom", "tag": "direct", "streamSettings": { "sockopt": { "tcpCongestion": "bbr" } } },
     { "protocol": "blackhole", "tag": "block" }
   ]
 }

@@ -110,10 +110,50 @@ if [ "$SERVER_MODE" = 1 ]; then
     *)   warn "unexpected HTTP ${UP}" ;;
   esac
 
-  step S7 "resources (1 GB box)"
-  echo "       $(free -m 2>/dev/null | awk '/Mem:/{printf "RAM used %s/%s MB", $3, $2}')"
-  echo "       $(uptime | sed 's/.*load average/load average/')"
+  step S7 "CPU / memory pressure (the usual cause of high ping under load)"
+  CORES="$(nproc 2>/dev/null || echo 1)"
+  MODEL="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //')"
+  [ -z "$MODEL" ] && MODEL="$(grep -m1 -E 'Model|Hardware' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ //')"
+  echo "       CPU: ${CORES} core(s)  ${MODEL:-unknown}"
+  LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
+  echo "       load(1m): ${LOAD1}   (sustained load > ${CORES} means CPU-bound)"
+  awk -v l="$LOAD1" -v c="$CORES" 'BEGIN{ if (l+0 > c+0) exit 0; exit 1 }' \
+    && warn "load exceeds core count — xray is CPU-starved; TLS will queue and ping will spike" \
+    || pass "CPU not saturated right now"
+
+  # Oracle Always Free AMD micro is 1/8 OCPU: it throttles hard under TLS load.
+  if echo "$MODEL" | grep -qiE 'EPYC.*7551|E2\.1'; then
+    warn "this looks like the E2.1.Micro (1/8 OCPU) shape — the weakest free shape"
+  fi
+  [ "$CORES" -le 1 ] && warn "only ${CORES} core: saturating the link will inflate latency; ARM A1.Flex (up to 4 OCPU) removes this"
+
+  echo "       $(free -m 2>/dev/null | awk '/Mem:/{printf "RAM %s/%s MB used", $3, $2}')"
+  SWAP_T="$(free -m 2>/dev/null | awk '/Swap:/{print $2}')"
+  SWAP_U="$(free -m 2>/dev/null | awk '/Swap:/{print $3}')"
+  if [ "${SWAP_T:-0}" = "0" ]; then
+    echo "       swap: none (fine — but an OOM kills xray instead of slowing it)"
+  elif [ "${SWAP_U:-0}" -gt 32 ] 2>/dev/null; then
+    warn "swap in use (${SWAP_U} MB) — swapping adds huge latency; reduce devices or resize"
+  fi
   echo "       congestion control: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+  echo "       qdisc: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
+
+  step S8 "xray CPU cost right now"
+  XPID="$(pgrep -x xray 2>/dev/null | head -1)"
+  if [ -n "$XPID" ]; then
+    C1="$(awk '{print $14+$15}' /proc/$XPID/stat 2>/dev/null)"; sleep 2
+    C2="$(awk '{print $14+$15}' /proc/$XPID/stat 2>/dev/null)"
+    HZ="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+    PCT="$(awk -v a="$C1" -v b="$C2" -v hz="$HZ" 'BEGIN{printf "%.0f", (b-a)/hz/2*100}')"
+    echo "       xray using ~${PCT}% of one core (idle sample)"
+    awk -v p="$PCT" 'BEGIN{exit !(p+0 > 80)}' \
+      && warn "xray is near a full core while IDLE — something is wrong" \
+      || pass "xray idle CPU is normal"
+    echo "       TIP: re-run this DURING a speed test. If it pegs ~100%, your"
+    echo "            high ping is CPU saturation, not the network path."
+  else
+    warn "xray process not found"
+  fi
 
   echo
   echo "Server checks done. Now run this same script ON YOUR LAPTOP to test the path."
