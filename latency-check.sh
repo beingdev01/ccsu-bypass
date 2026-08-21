@@ -1,73 +1,104 @@
 #!/usr/bin/env bash
 #
-# latency-check.sh — run this FROM A CLIENT (e.g. the campus Mac) to see where
-# your ping actually goes. It separates the two things that make up your number:
+# latency-check.sh — run FROM A CLIENT. Splits your ping into the three numbers
+# that actually mean different things, because VPN apps report the worst one:
 #
-#   1. RAW path Meerut<->Mumbai VPS  = the physical floor. Nothing in this repo
-#      can make the tunnel faster than this.
-#   2. TUNNEL overhead               = what VLESS+WS+TLS adds on top. Tuned to
-#      near-zero by setup.sh (BBR + tcpNoDelay).
-#
-# Target for this setup: 14-25 ms end-to-end. If RAW is already >25 ms, that's
-# geography/routing, not the proxy — no config change fixes it.
+#   1. RAW RTT        — TCP handshake to the VPS. The physical floor. No config
+#                       can beat it.
+#   2. WARM RTT       — a round trip on an ALREADY-OPEN tunnel connection. This
+#                       is what gaming and normal browsing feel. Target: raw + ~1ms.
+#   3. COLD REQUEST   — a brand-new connection to a remote site through the
+#                       tunnel: DNS + TLS to the VPS + TLS to the site. This is
+#                       what v2rayNG / Hiddify "real delay" tests measure, and it
+#                       is legitimately 4-6x the raw RTT. A high number here does
+#                       NOT mean your tunnel is slow.
 #
 # Usage:
 #   DOMAIN=vpn.codescriet.dev VPS_IP=<ip> ./latency-check.sh
-#   (SOCKS defaults to 127.0.0.1:2080 — the sing-box/xray client port.)
 set -u
 
 DOMAIN="${DOMAIN:-vpn.codescriet.dev}"
 VPS_IP="${VPS_IP:-}"
 SOCKS="${SOCKS:-127.0.0.1:2080}"
 PORT="${PORT:-443}"
+HOST="${VPS_IP:-$DOMAIN}"
+SH="${SOCKS%%:*}"; SP="${SOCKS##*:}"
 
-echo "== 1. RAW TCP handshake latency to the VPS (the physical floor) =="
-# TCP connect time to :443 — works even where ICMP ping is blocked by Sophos.
-host="${VPS_IP:-$DOMAIN}"
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$host" "$PORT" <<'PY'
-import socket, time, sys
-host, port = sys.argv[1], int(sys.argv[2])
-times = []
-for _ in range(10):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(3)
-    t = time.time()
-    try:
-        s.connect((host, port)); times.append((time.time()-t)*1000)
-    except Exception as e:
-        print("  connect failed:", e)
-    finally:
-        s.close()
-    time.sleep(0.2)
-if times:
-    times.sort()
-    print(f"  samples={len(times)}  min={min(times):.1f}ms  "
-          f"median={times[len(times)//2]:.1f}ms  max={max(times):.1f}ms")
-    print("  ^ this is your PHYSICAL FLOOR. End-to-end ping can't beat it.")
+echo "ccsu-bypass latency — ${DOMAIN} (${HOST}:${PORT})"
+
+# ---- 1. RAW ----------------------------------------------------------------
+echo
+echo "[1] RAW RTT to the VPS (physical floor, no tunnel)"
+python3 - "$HOST" "$PORT" <<'PY'
+import socket,sys,time
+h,p=sys.argv[1],int(sys.argv[2]); ts=[]
+for _ in range(12):
+    s=socket.socket(); s.settimeout(5); t=time.time()
+    try: s.connect((h,p)); ts.append((time.time()-t)*1000)
+    except Exception as e: print("    connect error:",e); break
+    finally: s.close()
+    time.sleep(0.05)
+if ts:
+    ts.sort()
+    print(f"    n={len(ts)}  min={ts[0]:.1f}  median={ts[len(ts)//2]:.1f}  max={ts[-1]:.1f} ms")
+    m=ts[len(ts)//2]
+    print(f"    -> your floor is {m:.0f} ms; end-to-end can never be lower")
 PY
-else
-  echo "  (python3 not found — using ping instead)"
-  ping -c 10 "$host" | tail -n 2
-fi
 
+# ---- 2. WARM (the number that matters) -------------------------------------
 echo
-echo "== 2. END-TO-END latency THROUGH the tunnel =="
-echo "   (client -> Sophos -> VPS -> target, via SOCKS ${SOCKS})"
-# Time a tiny HTTPS request to a Mumbai-region target through the proxy.
+echo "[2] WARM RTT through an already-open tunnel connection"
+echo "    (this is what gaming actually feels)"
+python3 - "$SH" "$SP" <<'PY'
+import socket,sys,time
+sh,sp=sys.argv[1],int(sys.argv[2])
+try:
+    s=socket.create_connection((sh,sp),timeout=8)
+    s.sendall(b'\x05\x01\x00')
+    if s.recv(2)!=b'\x05\x00': raise RuntimeError('socks handshake failed')
+    # CONNECT to a well-known echo-ish endpoint: cloudflare 1.1.1.1:80
+    s.sendall(b'\x05\x01\x00\x01'+bytes([1,1,1,1])+(80).to_bytes(2,'big'))
+    r=s.recv(10)
+    if not r or r[1]!=0: raise RuntimeError(f'socks connect rejected ({r[1] if r else "no reply"})')
+    s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
+    ts=[]
+    req=b'HEAD / HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: keep-alive\r\n\r\n'
+    for _ in range(15):
+        t=time.time(); s.sendall(req)
+        d=s.recv(4096)
+        if not d: break
+        ts.append((time.time()-t)*1000); time.sleep(0.05)
+    s.close()
+    if ts:
+        ts.sort()
+        print(f"    n={len(ts)}  min={ts[0]:.1f}  median={ts[len(ts)//2]:.1f}  max={ts[-1]:.1f} ms")
+        print(f"    -> steady-state tunnel latency = {ts[len(ts)//2]:.0f} ms")
+    else:
+        print("    no samples (server closed the connection)")
+except Exception as e:
+    print(f"    could not test: {e}")
+    print("    Is the client running and listening on "+f"{sh}:{sp}?")
+PY
+
+# ---- 3. COLD (what the app reports) ----------------------------------------
+echo
+echo "[3] COLD request through the tunnel (new DNS + TLS each time)"
+echo "    (this is what the app's 'real delay' shows — expect 4-6x the floor)"
 if command -v curl >/dev/null 2>&1; then
-  for i in 1 2 3 4 5; do
-    t=$(curl -s -o /dev/null -x "socks5h://${SOCKS}" \
-         -w '%{time_connect}' https://www.google.com 2>/dev/null)
-    [ -n "$t" ] && awk -v t="$t" 'BEGIN{printf "  connect #%d: %.1f ms\n", '"$i"', t*1000}'
+  for i in 1 2 3; do
+    t=$(curl -s -o /dev/null -w '%{time_total}' --max-time 20 \
+        -x "socks5h://${SOCKS}" https://www.google.com/generate_204 2>/dev/null || echo "")
+    [ -n "$t" ] && awk -v t="$t" -v i="$i" 'BEGIN{printf "    attempt %d: %.0f ms\n", i, t*1000}'
   done
-  echo "  (subtract the RAW floor above to see the tunnel's own overhead)"
+  echo "    (first is slowest — later ones reuse DNS cache + connection)"
 else
-  echo "  curl not found; skip."
+  echo "    curl not found; skipped"
 fi
 
 echo
-echo "Interpretation:"
-echo "  end-to-end ~= RAW floor + a few ms tunnel overhead."
-echo "  If RAW <= ~20 ms you should land in the 14-25 ms band."
-echo "  If RAW  > ~25 ms, the Meerut<->Mumbai path is the limit, not this setup."
+echo "─────────────────────────────────────────────────────────────"
+echo "How to read this:"
+echo "  [2] WARM near [1] RAW  -> the tunnel is healthy. Any big number your"
+echo "      VPN app shows is its cold-start test, not your real latency."
+echo "  [2] WARM much higher than [1] -> real tunnel problem; send me all three."
+echo "  [1] RAW itself high    -> routing/geography; no config fixes it."

@@ -56,10 +56,17 @@ const singbox = {
   log: { level: 'warn' },
 
   // See note 1 at the top of this file.
+  //
+  // LATENCY: this is PLAIN DNS (udp), deliberately not DoH. The query already
+  // travels inside the VLESS tunnel, so it is encrypted end-to-end and the
+  // firewall sees nothing either way. Using DoH here would wrap it in a SECOND
+  // TLS layer, costing a full extra handshake (~3 round trips) before the first
+  // packet of every new domain — at 25 ms RTT that alone adds 100 ms+ to every
+  // cold connection. Redundant encryption, real latency.
   dns: {
     servers: [
       // Resolved INSIDE the tunnel — the firewall sees only the tunnel.
-      { tag: 'proxy-dns', address: 'https://1.1.1.1/dns-query', detour: 'proxy' },
+      { tag: 'proxy-dns', address: '1.1.1.1', detour: 'proxy' },
       // Used only for the proxy's own hostname (chicken-and-egg).
       { tag: 'local-dns', address: 'local', detour: 'direct' }
     ],
@@ -68,7 +75,9 @@ const singbox = {
     ],
     final: 'proxy-dns',
     strategy: 'prefer_ipv4',
-    disable_cache: false
+    // Cache aggressively: a repeat lookup should cost 0 round trips.
+    disable_cache: false,
+    disable_expire: false
   },
 
   inbounds: [
