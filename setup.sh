@@ -129,16 +129,43 @@ cat > /etc/xray/config.json <<JSON
             }
           ]
         },
-        "wsSettings": { "path": "${WS_PATH}" }
+        "wsSettings": { "path": "${WS_PATH}" },
+        "sockopt": { "tcpNoDelay": true, "tcpFastOpen": true, "tcpcongestion": "bbr" }
       }
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "freedom", "tag": "direct", "streamSettings": { "sockopt": { "tcpNoDelay": true, "tcpcongestion": "bbr" } } },
     { "protocol": "blackhole", "tag": "block" }
   ]
 }
 JSON
+
+# --- 5b. Low-latency kernel/network tuning -----------------------------------
+# This box does one job (the proxy), so tune the whole stack for interactive
+# latency, not throughput fairness:
+#   BBR + fq        -> low queueing delay, no bufferbloat under load
+#   tcp_fastopen=3  -> skip a round trip on both client and server sockets
+#   slow_start_after_idle=0 -> don't collapse the window on brief idle (gaming)
+#   mtu_probing=1   -> avoid black-hole stalls if the path MTU is odd (Oracle)
+#   low_latency/notsent buffers -> keep the send queue short
+echo "==> Applying low-latency network tuning..."
+modprobe tcp_bbr 2>/dev/null || true
+echo 'tcp_bbr' > /etc/modules-load.d/bbr.conf 2>/dev/null || true
+cat > /etc/sysctl.d/99-ccsu-latency.conf <<'SYSCTL'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_notsent_lowat=16384
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 131072 16777216
+net.ipv4.tcp_wmem=4096 131072 16777216
+SYSCTL
+sysctl --system >/dev/null 2>&1 || true
+echo "    congestion control now: $(sysctl -n net.ipv4.tcp_congestion_control)"
 
 # --- 6. systemd service ------------------------------------------------------
 echo "==> Installing systemd service..."

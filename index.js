@@ -61,12 +61,20 @@ const config = {
             { certificateFile: CERT_FILE, keyFile: KEY_FILE }
           ]
         },
-        wsSettings: { path: WS_PATH }
+        wsSettings: { path: WS_PATH },
+        // Latency tuning for the client<->VPS leg:
+        //   tcpNoDelay  -> disable Nagle so small interactive/game packets
+        //                  are sent immediately instead of being buffered.
+        //   tcpFastOpen -> save a round trip on connection setup.
+        //   tcpcongestion=bbr -> low-latency congestion control (module loaded
+        //                  and enabled system-wide by setup.sh).
+        sockopt: { tcpNoDelay: true, tcpFastOpen: true, tcpcongestion: 'bbr' }
       }
     }
   ],
   outbounds: [
-    { protocol: 'freedom', tag: 'direct' },
+    // Same no-Nagle treatment on the VPS<->destination leg.
+    { protocol: 'freedom', tag: 'direct', streamSettings: { sockopt: { tcpNoDelay: true, tcpcongestion: 'bbr' } } },
     { protocol: 'blackhole', tag: 'block' }
   ]
 };
