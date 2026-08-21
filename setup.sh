@@ -56,12 +56,24 @@ ask PORT    "TLS port"        "443"
 ask WS_PATH "WebSocket path"  "/cdn"
 APEX="${DOMAIN#*.}"
 ask EMAIL   "Email for Let's Encrypt expiry notices" "admin@${APEX}"
-if [ -z "${UUID:-}" ]; then
-  UUID="$(cat /proc/sys/kernel/random/uuid)"
-  ok "Generated client UUID: ${c_g}${UUID}${c_0}"
+ask DEVICES "How many devices will connect (one credential each)" "8"
+
+# One UUID per device: a lost phone can be revoked without touching the others,
+# and per-device credentials keep flows attributable. UUID (single) still works;
+# UUIDS (comma list) is what the multi-device config is built from.
+if [ -n "${UUIDS:-}" ]; then
+  ok "Using provided UUIDS (${UUIDS})"
+elif [ -n "${UUID:-}" ]; then
+  UUIDS="$UUID"; ok "Using provided UUID: ${UUID}"
 else
-  ok "Using provided UUID: ${UUID}"
+  UUIDS=""
+  for i in $(seq 1 "${DEVICES:-1}"); do
+    UUIDS="${UUIDS:+$UUIDS,}$(cat /proc/sys/kernel/random/uuid)"
+  done
+  ok "Generated ${DEVICES} device UUID(s)"
 fi
+# First UUID is the "primary" used in single-value spots.
+UUID="${UUIDS%%,*}"
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ---- 2. install packages ----------------------------------------------------
@@ -240,6 +252,13 @@ ok "congestion control: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
 # ---- 9. write the server config ---------------------------------------------
 info "Writing /etc/xray/config.json ..."
 mkdir -p /etc/xray
+# Build the clients[] JSON from every device UUID.
+CLIENTS_JSON="$(python3 - "$UUIDS" <<'PY'
+import sys
+ids=[u.strip() for u in sys.argv[1].split(',') if u.strip()]
+print(','.join('{ "id": "%s" }' % u for u in ids))
+PY
+)"
 cat > /etc/xray/config.json <<JSON
 {
   "log": { "loglevel": "warning" },
@@ -248,7 +267,7 @@ cat > /etc/xray/config.json <<JSON
       "listen": "0.0.0.0",
       "port": ${PORT},
       "protocol": "vless",
-      "settings": { "clients": [ { "id": "${UUID}" } ], "decryption": "none" },
+      "settings": { "clients": [ ${CLIENTS_JSON} ], "decryption": "none" },
       "streamSettings": {
         "network": "ws",
         "security": "tls",
@@ -314,8 +333,39 @@ HOOK
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh
 ok "auto-renewal hook installed"
 
-# ---- 12. build the share link + save credentials ---------------------------
+# ---- 11b. self-healing watchdog (systemd timer) -----------------------------
+# Proves the tunnel actually serves (WS upgrade -> 101), not just that the
+# process is alive, and fixes the silent-rot cases. Runs every 3 minutes.
+info "Installing self-healing watchdog..."
+install -m 0755 "${APP_DIR}/healthcheck.sh" /usr/local/bin/ccsu-healthcheck.sh 2>/dev/null \
+  || cp "${APP_DIR}/healthcheck.sh" /usr/local/bin/ccsu-healthcheck.sh
+chmod +x /usr/local/bin/ccsu-healthcheck.sh
+cat > /etc/systemd/system/ccsu-heal.service <<UNIT
+[Unit]
+Description=ccsu-bypass self-healing check
+After=xray.service
+[Service]
+Type=oneshot
+Environment=DOMAIN=${DOMAIN} PORT=${PORT} WS_PATH=${WS_PATH}
+ExecStart=/usr/local/bin/ccsu-healthcheck.sh
+UNIT
+cat > /etc/systemd/system/ccsu-heal.timer <<'UNIT'
+[Unit]
+Description=Run ccsu-bypass self-healing check every 3 minutes
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=180
+AccuracySec=30
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now ccsu-heal.timer >/dev/null 2>&1
+ok "watchdog active (systemctl list-timers ccsu-heal.timer)"
+
+# ---- 12. build per-device share links + save credentials --------------------
 ENC_PATH="$(printf '%s' "$WS_PATH" | sed 's|/|%2F|g')"
+# Primary link (first device) for the summary/QR.
 LINK="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=${ENC_PATH}#CCSU-Bypass"
 
 CRED="${APP_DIR}/credentials.txt"
@@ -325,10 +375,17 @@ CRED="${APP_DIR}/credentials.txt"
   echo "IP     : ${PUBIP:-<unknown>}"
   echo "PORT   : ${PORT}"
   echo "PATH   : ${WS_PATH}"
-  echo "UUID   : ${UUID}"
   echo
-  echo "Share link:"
-  echo "${LINK}"
+  echo "One share link PER DEVICE (give each device its own):"
+  n=1
+  IFS=','; for u in $UUIDS; do
+    u="$(printf '%s' "$u" | tr -d '[:space:]')"
+    echo
+    echo "  device ${n}  (UUID ${u}):"
+    echo "  vless://${u}@${DOMAIN}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=${ENC_PATH}#CCSU-dev${n}"
+    n=$((n+1))
+  done
+  unset IFS
 } > "$CRED"
 chmod 600 "$CRED"
 

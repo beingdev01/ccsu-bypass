@@ -32,7 +32,13 @@ const WS_PATH = process.env.WS_PATH || '/cdn';
 const CERT_FILE = process.env.CERT_FILE || `/etc/letsencrypt/live/${DOMAIN}/fullchain.pem`;
 const KEY_FILE  = process.env.KEY_FILE  || `/etc/letsencrypt/live/${DOMAIN}/privkey.pem`;
 
-if (UUID === '49189805-e1ed-4627-820a-806adb82c169') {
+// One UUID per device is best: separate credentials mean you can revoke a lost
+// phone without disturbing anyone else, and the server can tell flows apart.
+// Pass several as UUIDS="uuid1,uuid2,..." (UUID stays the single-device form).
+const UUIDS = (process.env.UUIDS || UUID)
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+if (UUIDS.includes('49189805-e1ed-4627-820a-806adb82c169')) {
   console.warn('[warn] Using the built-in default UUID. This is PUBLIC (it is in git).');
   console.warn('[warn] Set your own:  export UUID=$(cat /proc/sys/kernel/random/uuid)');
 }
@@ -46,7 +52,7 @@ const config = {
       port: PORT,
       protocol: 'vless',
       settings: {
-        clients: [{ id: UUID }],
+        clients: UUIDS.map(id => ({ id })),
         decryption: 'none'
       },
       streamSettings: {

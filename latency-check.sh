@@ -6,7 +6,7 @@
 #   1. RAW path Meerut<->Mumbai VPS  = the physical floor. Nothing in this repo
 #      can make the tunnel faster than this.
 #   2. TUNNEL overhead               = what VLESS+WS+TLS adds on top. Tuned to
-#      near-zero by setup.sh (BBR + tcpNoDelay + TCP Fast Open).
+#      near-zero by setup.sh (BBR + tcpNoDelay).
 #
 # Target for this setup: 14-25 ms end-to-end. If RAW is already >25 ms, that's
 # geography/routing, not the proxy — no config change fixes it.

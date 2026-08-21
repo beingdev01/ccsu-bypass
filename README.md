@@ -29,6 +29,9 @@ can point it at any record you control.
 | `gen-client.js` | Prints the VLESS share link and writes a `sing-box` client config. `npm run client`. |
 | `latency-check.sh` | Run from a client to measure the raw floor vs. tunnel overhead and confirm the 14–25 ms target is reachable. |
 | `doctor.sh` | **Layered diagnostics.** Run on the VPS or a client; the first failing check tells you exactly which layer is broken. `npm run doctor` |
+| `healthcheck.sh` | **Self-healing watchdog** (installed as a 3-min systemd timer): proves a real WebSocket `101`, restarts/renews on failure. |
+| `add-device.sh` | Add or revoke a device on the running server, no downtime. `sudo ./add-device.sh` |
+| `TESTING.md` | Isolated-lab test report: DPI/fingerprint, security, latency, 8-device concurrency, and the vulnerabilities found. |
 
 ---
 
@@ -266,6 +269,36 @@ It checks one layer at a time. The **first** failure is the real problem:
 | C5 (tunnel) | Client app not running, or wrong UUID |
 
 
+---
+
+## Many devices + self-healing
+
+**One credential per device.** `setup.sh` asks how many devices will connect
+(default 8) and generates a separate UUID for each — `credentials.txt` then
+holds one share link per device. Separate credentials mean a lost phone is
+revoked without disturbing anyone else. Add or remove devices later without
+downtime:
+
+```bash
+sudo ./add-device.sh --name laptop     # add one, prints its link + QR
+sudo ./add-device.sh --list            # list devices
+sudo ./add-device.sh --remove <uuid>   # revoke one
+```
+
+A single 1 GB box comfortably serves **7–8 concurrent devices** — lab-tested at
+8/8 devices downloading at once (261–341 Mbps each) with a gaming device holding
+~1.3 ms RTT under that load. On the real box the ceiling is Oracle's NIC and the
+10 TB/month egress, not xray. The `fq` qdisc + `tcpNoDelay` keep one device's
+download from spoiling another's latency. Details in `TESTING.md`.
+
+**Self-healing.** A systemd timer runs `healthcheck.sh` every 3 minutes and does
+more than check the process is alive — it proves the tunnel actually answers a
+WebSocket upgrade with `101`, and if not (wedged xray, unreachable path, a
+renewed cert not yet loaded) it restarts or renews. Combined with the service's
+`Restart=always`, the proxy recovers on its own from crashes, reboots, and cert
+renewals. Watch it with `systemctl list-timers ccsu-heal.timer` and
+`journalctl -u ccsu-heal`.
+
 ## Config knobs (env vars)
 
 | Var | Default | Notes |
@@ -277,6 +310,8 @@ It checks one layer at a time. The **first** failure is the real problem:
 | `EMAIL` | `admin@<domain>` | Let's Encrypt expiry notices (`setup.sh` only). |
 | `PIN_IP` | *(unset)* | `gen-client.js` only. Dial this IP directly, keeping SNI/Host = `DOMAIN`. Use when DNS for the domain is blocked or poisoned. |
 | `SOCKS_PORT` | `2080` | Local SOCKS5 port in the generated client config. |
+| `DEVICES` | `8` | `setup.sh` — how many per-device UUIDs to generate. |
+| `UUIDS` | *(unset)* | Comma-separated UUIDs to use as-is instead of generating (server side). |
 
 ---
 

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "client": "node gen-client.js",
-    "doctor": "bash doctor.sh"
+    "doctor": "bash doctor.sh",
+    "add-device": "bash add-device.sh"
   },
   "license": "MIT"
 }
