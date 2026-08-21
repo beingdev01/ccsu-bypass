@@ -1,11 +1,13 @@
 {
   "name": "ccsu-bypass",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "VLESS + WebSocket + TLS origin (Xray) for bypassing DPI firewalls behind your own domain.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "client": "node gen-client.js",
+    "doctor": "bash doctor.sh",
+    "add-device": "bash add-device.sh"
   },
-  "dependencies": {
-    "ws": "^8.0.0"
-  }
+  "license": "MIT"
 }
