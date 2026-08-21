@@ -261,7 +261,7 @@ PY
 )"
 cat > /etc/xray/config.json <<JSON
 {
-  "log": { "loglevel": "warning" },
+  "log": { "loglevel": "warning", "access": "none" },
   "inbounds": [
     {
       "listen": "0.0.0.0",

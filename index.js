@@ -45,7 +45,11 @@ if (UUIDS.includes('49189805-e1ed-4627-820a-806adb82c169')) {
 
 // ---- Build the VLESS + WS + TLS server config --------------------------------
 const config = {
-  log: { loglevel: 'warning' },
+  // PRIVACY: access logging is OFF. With it on (xray's default), every
+  // destination your devices reach is written to stdout and captured by
+  // systemd into the journal — i.e. a browsing history of every user, sitting
+  // on the VPS. 'warning' still records real errors.
+  log: { loglevel: 'warning', access: 'none' },
   inbounds: [
     {
       listen: '0.0.0.0',
