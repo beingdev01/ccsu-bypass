@@ -28,6 +28,7 @@ can point it at any record you control.
 | `index.js` | Generates the VLESS+WS+TLS Xray config and runs Xray (arch-aware download). Used by `npm start` for manual runs. |
 | `gen-client.js` | Prints the VLESS share link and writes a `sing-box` client config. `npm run client`. |
 | `latency-check.sh` | Run from a client to measure the raw floor vs. tunnel overhead and confirm the 14–25 ms target is reachable. |
+| `doctor.sh` | **Layered diagnostics.** Run on the VPS or a client; the first failing check tells you exactly which layer is broken. `npm run doctor` |
 
 ---
 
@@ -62,7 +63,7 @@ That's it. The installer:
   the exact record to create until it does),
 - opens ports 80 + the TLS port in the host firewall,
 - obtains the Let's Encrypt certificate,
-- applies the low-latency tuning (BBR, `tcpNoDelay`, TCP Fast Open),
+- applies the low-latency tuning (BBR + `fq`, `tcpNoDelay`, buffer sizing),
 - writes `/etc/xray/config.json`, installs the systemd service, and installs the
   cert-renewal hook,
 - self-tests, saves everything to `credentials.txt`, and prints the **share
@@ -149,9 +150,10 @@ network stack is tuned for interactive latency rather than throughput fairness.
 |---|---|
 | `tcpNoDelay` (Xray sockopt, both legs) | disables Nagle — small game/interactive packets go out immediately instead of being buffered |
 | BBR + `fq` qdisc | low queueing delay, no bufferbloat under load |
-| TCP Fast Open (`tcp_fastopen=3`) | saves a round trip on connection setup |
 | `slow_start_after_idle=0` | window doesn't collapse after brief idle (matters for gaming) |
 | `tcp_mtu_probing=1` | avoids path-MTU black-hole stalls (Oracle networking quirk) |
+| `tcp_notsent_lowat` | keeps the send queue short so new data isn't stuck behind a backlog |
+| ALPN `http/1.1` only | prevents an h2 negotiation that would break the WebSocket upgrade |
 | Cloudflare **DNS-only** | mandatory — proxied/CDN adds 200–400 ms |
 
 **Verify the real floor** (run from the campus client, e.g. the Mac):
@@ -182,6 +184,88 @@ spikes — `slow_start_after_idle=0` and BBR soften this, but the clean fix is
 isolation. Do large syncs on home internet or direct to the bucket, not through
 the tunnel.
 
+---
+
+## Failure modes this setup handles (and the ones it can't)
+
+Everything below was found by auditing the design against how Sophos XG
+actually behaves. Fixed items are already in the code.
+
+### Fixed
+
+| Failure | Why it breaks | Fix |
+|---|---|---|
+| **ALPN negotiated `h2`** | A WebSocket upgrade is an HTTP/1.1 mechanism. Advertising `h2` lets the server pick it, and the WS handshake then fails — intermittently, which is the worst kind. | Server offers `http/1.1` only. Chrome still offers both, and picking http/1.1 is what any non-h2 site does. |
+| **TCP Fast Open** | Chrome disabled TFO by default, so using it makes you *less* browser-like — and some middleboxes drop SYNs carrying payload. It was a latency "optimization" that worked against the core goal. | Removed from both the socket options and sysctl. |
+| **Stray `AAAA` record** | Clients *prefer* IPv6. One leftover AAAA and your traffic goes somewhere other than the verified address — looks like a random, unfixable failure. | Installer detects it and tells you to remove it. |
+| **IPv6 firewall** | `iptables` rules don't cover IPv6, so v6 clients get silently dropped. | `ip6tables` rules added and persisted. |
+| **Clock skew** | A wrong system clock fails TLS validation and cert issuance with confusing errors. | Installer enables NTP and verifies sync. |
+| **Hairpin NAT self-test** | Connecting to your own public IP from inside the VPS often fails on Oracle — the old self-test reported failure on a perfectly healthy server. | Tests via `--resolve` to 127.0.0.1, and separately checks the public path. |
+| **Cryptic certbot failure** | The #1 real-world blocker is a missing Oracle VCN ingress rule on port 80, which certbot reports as an opaque challenge error. | Failure now prints the four actual causes, ranked. |
+| **Weak self-test** | A `400` only proves TLS works, not that the WebSocket path is right — a path typo passed the old test and failed at connect time. | Now performs a real WS upgrade and requires `101`. |
+| **DNS leak / DNS-level blocking** | Sophos intercepts DNS at the gateway. With traffic tunnelled but DNS local, it still sees every domain you visit and can block sites at the DNS layer. | Client resolves DNS **inside the tunnel** (`detour: proxy`). See below. |
+| **Boot ordering** | `network.target` fires before the network is usable; xray could restart-loop at boot. | Unit uses `network-online.target` plus a start-limit. |
+
+### The DNS fix, specifically
+
+Your writeup records that pointing the client at DoH (`https://1.1.1.1/dns-query`)
+**failed** — Sophos blocks that connection, so nothing resolved. That is correct,
+and this is *not* a repeat of it: the DoH query is now sent **through the VLESS
+tunnel** (`detour: "proxy"`), so the firewall only ever sees the tunnel. The
+proxy's own hostname is the one exception — it must resolve locally, or you'd
+have a chicken-and-egg problem.
+
+When testing with curl, use **`socks5h`**, not `socks5` — the `h` is what makes
+the resolver run at the proxy end. `socks5` leaks every hostname to the firewall
+even though the payload is tunnelled.
+
+### If DNS for your domain is ever blocked
+
+Name resolution dies before the tunnel is even attempted. Pin the IP instead —
+the client dials the address directly while still sending SNI/Host = your domain,
+so it still looks like ordinary HTTPS and needs no lookup at all:
+
+```bash
+PIN_IP=<your-vps-ip> DOMAIN=vpn.codescriet.dev UUID=<uuid> npm run client
+```
+
+### Known limits — worth understanding
+
+- **Active probing.** Xray answers any non-WebSocket request with a bare `400`.
+  A domain serving a valid certificate but no actual website is anomalous if
+  anyone deliberately probes it. Sophos blocks by *fingerprint*, not by probing
+  origins, so this is not your current failure mode — but if you ever want to
+  close it, the fix is to put a real site in front (nginx serving a static page,
+  proxying only the WS path to xray). That adds a component to something that
+  currently works, so it is deliberately not the default.
+- **UDP and gaming.** UDP is carried over the TCP tunnel. It works, but
+  TCP-over-TCP means a lost packet stalls the stream (head-of-line blocking), so
+  jitter under packet loss is worse than native UDP. Ping stays low; stability
+  under a lossy campus link is the tradeoff.
+- **The raw path.** No configuration beats the physical Meerut↔Mumbai RTT.
+  `latency-check.sh` tells you what that floor actually is.
+- **Single port.** If port 443 to your host is ever blocked outright, you need
+  a plan B — flip the Cloudflare record to orange (proxied). It costs latency
+  (~400 ms) and upload throughput, but your writeup proved it works when direct
+  does not. Server config needs no change.
+
+### When something breaks, run the doctor
+
+```bash
+npm run doctor                    # on the VPS: service, cert, ports, config
+DOMAIN=vpn.codescriet.dev npm run doctor   # on your laptop: the whole path
+```
+
+It checks one layer at a time. The **first** failure is the real problem:
+
+| First failure | Meaning |
+|---|---|
+| C2 (TCP) | Port blocked — VCN ingress rule missing, or firewall blocking layer 4 |
+| C3 (TLS) | Handshake killed — fingerprint rejected, or a certificate/MITM problem |
+| C4 (WebSocket) | Client and server disagree on the path |
+| C5 (tunnel) | Client app not running, or wrong UUID |
+
+
 ## Config knobs (env vars)
 
 | Var | Default | Notes |
@@ -191,6 +275,8 @@ the tunnel.
 | `PORT` | `443` | TLS listen port. Keep 443 — least likely to be blocked. |
 | `WS_PATH` | `/cdn` | WebSocket path; must match on client and server. |
 | `EMAIL` | `admin@<domain>` | Let's Encrypt expiry notices (`setup.sh` only). |
+| `PIN_IP` | *(unset)* | `gen-client.js` only. Dial this IP directly, keeping SNI/Host = `DOMAIN`. Use when DNS for the domain is blocked or poisoned. |
+| `SOCKS_PORT` | `2080` | Local SOCKS5 port in the generated client config. |
 
 ---
 

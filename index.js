@@ -53,9 +53,11 @@ const config = {
         network: 'ws',
         security: 'tls',
         tlsSettings: {
-          // ALPN kept to what a real HTTPS site offers, so the handshake
-          // is indistinguishable from normal browser traffic.
-          alpn: ['h2', 'http/1.1'],
+          // http/1.1 ONLY. A WebSocket upgrade is an HTTP/1.1 mechanism; if we
+          // also advertise h2 the server may negotiate it and the WS handshake
+          // then fails. Chrome offers [h2, http/1.1] and picking http/1.1 is
+          // exactly what any non-h2 site does, so this stays unremarkable.
+          alpn: ['http/1.1'],
           minVersion: '1.2',
           certificates: [
             { certificateFile: CERT_FILE, keyFile: KEY_FILE }
@@ -65,10 +67,12 @@ const config = {
         // Latency tuning for the client<->VPS leg:
         //   tcpNoDelay  -> disable Nagle so small interactive/game packets
         //                  are sent immediately instead of being buffered.
-        //   tcpFastOpen -> save a round trip on connection setup.
         //   tcpcongestion=bbr -> low-latency congestion control (module loaded
         //                  and enabled system-wide by setup.sh).
-        sockopt: { tcpNoDelay: true, tcpFastOpen: true, tcpcongestion: 'bbr' }
+        // NOTE: TCP Fast Open is deliberately NOT used. Chrome disabled it by
+        // default, so it makes us LESS browser-like, and some middleboxes drop
+        // SYN packets carrying payload outright.
+        sockopt: { tcpNoDelay: true, tcpcongestion: 'bbr' }
       }
     }
   ],

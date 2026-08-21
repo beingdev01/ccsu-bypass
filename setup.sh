@@ -105,6 +105,7 @@ try: print(socket.gethostbyname(sys.argv[1]))
 except Exception: pass
 PY
 }
+resolve_aaaa(){ have dig && dig +short AAAA "$1" | grep -E '^[0-9a-fA-F:]+$' | tail -1 || true; }
 info "Checking that ${DOMAIN} points to this VPS..."
 if [ -n "$PUBIP" ]; then
   while true; do
@@ -129,18 +130,48 @@ else
   warn "skipping DNS verification (no public IP detected)"
 fi
 
+# A stray AAAA record is a classic silent breaker: clients prefer IPv6, so they
+# would connect somewhere other than the address we just verified.
+AAAA="$(resolve_aaaa "$DOMAIN")"
+if [ -n "$AAAA" ]; then
+  if ip -6 addr show scope global 2>/dev/null | grep -q "${AAAA%%/*}"; then
+    ok "AAAA ${AAAA} is this host (fine)"
+  else
+    warn "${DOMAIN} also has an AAAA record: ${AAAA}"
+    warn "Clients PREFER IPv6 and would connect there instead of ${PUBIP}."
+    warn "Delete that AAAA record in Cloudflare unless it is this VPS."
+  fi
+fi
+
 # ---- 5. host firewall: open 80 (cert) + PORT (proxy) ------------------------
 info "Opening ports 80 and ${PORT} in the host firewall..."
 open_port(){ local p="$1"; iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT; }
+open_port6(){ local p="$1"; have ip6tables || return 0
+  ip6tables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true; }
 open_port 80; open_port "$PORT"
+open_port6 80; open_port6 "$PORT"
 if have netfilter-persistent; then netfilter-persistent save >/dev/null 2>&1 || true
-else mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4 2>/dev/null || true; fi
+else
+  mkdir -p /etc/iptables
+  iptables-save  > /etc/iptables/rules.v4 2>/dev/null || true
+  have ip6tables-save && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+fi
 if have firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
   firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
   firewall-cmd --permanent --add-port="${PORT}"/tcp >/dev/null 2>&1 || true
   firewall-cmd --reload >/dev/null 2>&1 || true
 fi
 ok "firewall rules in place"
+
+# ---- 5b. time sync (a skewed clock breaks TLS validation and cert issuance) --
+info "Checking clock sync..."
+if have timedatectl; then
+  timedatectl set-ntp true >/dev/null 2>&1 || true
+  if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then ok "clock synced"
+  else warn "clock not confirmed synced — if TLS fails later, check 'timedatectl'"; fi
+else
+  warn "timedatectl unavailable; ensure the system clock is correct"
+fi
 
 # ---- 6. free port 80, then get the certificate ------------------------------
 CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
@@ -156,7 +187,20 @@ else
     ss -ltnp '( sport = :80 )' || true
   fi
   info "Requesting Let's Encrypt certificate for ${DOMAIN}..."
-  certbot certonly --standalone --non-interactive --agree-tos -m "$EMAIL" -d "$DOMAIN"
+  if ! certbot certonly --standalone --non-interactive --agree-tos -m "$EMAIL" -d "$DOMAIN"; then
+    echo
+    err "Certificate issuance failed. It is almost always one of these:"
+    echo "  1. Oracle VCN / NSG has no INGRESS rule for TCP 80 from 0.0.0.0/0."
+    echo "     Let's Encrypt must reach this box on port 80 to verify the domain."
+    echo "     Fix in the Oracle console: Networking > VCN > Security List > Add Ingress."
+    echo "  2. ${DOMAIN} does not resolve to ${PUBIP:-this VPS} yet, or is still"
+    echo "     ORANGE-clouded in Cloudflare. It must be GREY (DNS only) right now."
+    echo "  3. Something else is listening on port 80 (check: ss -ltnp | grep :80)."
+    echo "  4. Rate limit: 5 failures/hour per domain. Wait an hour if you retried a lot."
+    echo
+    echo "  Re-run this script once fixed — it is safe to run repeatedly."
+    exit 1
+  fi
   ok "certificate issued"
 fi
 
@@ -176,13 +220,12 @@ rm -rf "$TMP"
 ok "xray -> $(/usr/local/bin/xray version 2>/dev/null | head -n1)"
 
 # ---- 8. low-latency kernel/network tuning -----------------------------------
-info "Applying low-latency network tuning (BBR, fq, TCP Fast Open)..."
+info "Applying low-latency network tuning (BBR, fq, no-Nagle)..."
 modprobe tcp_bbr 2>/dev/null || true
 echo 'tcp_bbr' > /etc/modules-load.d/bbr.conf 2>/dev/null || true
 cat > /etc/sysctl.d/99-ccsu-latency.conf <<'SYSCTL'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_notsent_lowat=16384
@@ -210,7 +253,7 @@ cat > /etc/xray/config.json <<JSON
         "network": "ws",
         "security": "tls",
         "tlsSettings": {
-          "alpn": ["h2", "http/1.1"],
+          "alpn": ["http/1.1"],
           "minVersion": "1.2",
           "certificates": [
             {
@@ -220,7 +263,7 @@ cat > /etc/xray/config.json <<JSON
           ]
         },
         "wsSettings": { "path": "${WS_PATH}" },
-        "sockopt": { "tcpNoDelay": true, "tcpFastOpen": true, "tcpcongestion": "bbr" }
+        "sockopt": { "tcpNoDelay": true, "tcpcongestion": "bbr" }
       }
     }
   ],
@@ -238,12 +281,17 @@ info "Installing + starting systemd service..."
 cat > /etc/systemd/system/xray.service <<'UNIT'
 [Unit]
 Description=Xray VLESS+WS+TLS (ccsu-bypass)
-After=network.target
+# network-online (not just network.target) so the cert/DNS are usable at boot.
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json
 Restart=always
 RestartSec=3
+# Don't hammer forever on a broken config/cert — surface the failure instead.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 LimitNOFILE=1048576
@@ -285,10 +333,47 @@ CRED="${APP_DIR}/credentials.txt"
 chmod 600 "$CRED"
 
 # ---- 13. self-test ----------------------------------------------------------
-info "Self-test (a plain GET to the WS path should return HTTP 400)..."
-CODE="$(curl -sk --max-time 8 "https://${DOMAIN}:${PORT}${WS_PATH}" -o /dev/null -w '%{http_code}' 2>/dev/null || echo '000')"
-if [ "$CODE" = "400" ]; then ok "origin answered 400 — xray is serving TLS+WS correctly"
-else warn "self-test returned ${CODE} (expected 400). If 000, check DNS/cert; otherwise it may still be fine."; fi
+# Test against 127.0.0.1 via --resolve: hairpin NAT to our own public IP often
+# fails on Oracle and would look like a failure when the server is fine.
+info "Self-test 1/3: TLS handshake + certificate..."
+if curl -s --max-time 10 --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
+     "https://${DOMAIN}:${PORT}/" -o /dev/null 2>/dev/null; then
+  ok "TLS handshake OK and certificate is trusted for ${DOMAIN}"
+else
+  # A 400 body still means TLS+cert worked; only a handshake error is fatal.
+  if curl -sk --max-time 10 --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
+       "https://${DOMAIN}:${PORT}/" -o /dev/null 2>/dev/null; then
+    ok "TLS handshake OK (cert chain served)"
+  else
+    warn "TLS handshake failed locally — check 'journalctl -u xray -n 30'"
+  fi
+fi
+
+info "Self-test 2/3: WebSocket upgrade on ${WS_PATH} (expect 101)..."
+WSKEY="$(head -c 16 /dev/urandom | base64)"
+UP="$(curl -sk --max-time 10 --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
+      -o /dev/null -w '%{http_code}' \
+      -H "Connection: Upgrade" -H "Upgrade: websocket" \
+      -H "Sec-WebSocket-Key: ${WSKEY}" -H "Sec-WebSocket-Version: 13" \
+      "https://${DOMAIN}:${PORT}${WS_PATH}" 2>/dev/null || true)"
+UP="${UP:-000}"; UP="${UP: -3}"
+if [ "$UP" = "101" ]; then ok "WebSocket upgrade accepted (101) — path ${WS_PATH} is live"
+else warn "WebSocket upgrade returned ${UP} (expected 101). Path mismatch or xray not serving."; fi
+
+info "Self-test 3/3: reachability from OUTSIDE (Oracle VCN check)..."
+# This is the layer the OS firewall cannot prove. If this fails but the local
+# tests passed, the VCN/NSG ingress rule is missing.
+EXT="$(curl -sk --max-time 12 -o /dev/null -w '%{http_code}' \
+       "https://${DOMAIN}:${PORT}${WS_PATH}" 2>/dev/null || true)"
+EXT="${EXT:-000}"; EXT="${EXT: -3}"
+if [ "$EXT" != "000" ]; then
+  ok "reachable over the public path (HTTP ${EXT})"
+else
+  warn "could not reach ${DOMAIN}:${PORT} over the public path."
+  warn "If self-tests 1-2 passed, add an Oracle VCN INGRESS rule for TCP ${PORT}"
+  warn "from 0.0.0.0/0 (Networking > VCN > Security Lists). Note this test can"
+  warn "also fail harmlessly due to hairpin NAT — verify from your laptop."
+fi
 
 # ---- 14. done ---------------------------------------------------------------
 echo
