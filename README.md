@@ -20,6 +20,122 @@ can point it at any record you control.
 
 ---
 
+## Complete Oracle VPS walkthrough (zero → connected)
+
+Follow these in order. Steps 1–4 are in web consoles (Oracle + Cloudflare);
+step 5 is one command on the box; step 6 is your phone/laptop. Budget ~15 min.
+
+### 1. Create the Oracle instance
+
+1. Sign in at <https://cloud.oracle.com> → **Menu → Compute → Instances →
+   Create instance**.
+2. **Placement:** pick the **Mumbai** region (`ap-mumbai-1`) — lowest ping from
+   Meerut of Oracle's India regions.
+3. **Image and shape:**
+   - Image: **Canonical Ubuntu 22.04** (or 24.04).
+   - Shape: **Always Free eligible.** Either `VM.Standard.E2.1.Micro` (AMD,
+     1 GB) or, better if offered, `VM.Standard.A1.Flex` (ARM — set 1 OCPU /
+     6 GB, still free, more bandwidth). The installer auto-detects x86 vs ARM.
+4. **Networking:** leave it to create a new VCN, and **"Assign a public IPv4
+   address" = Yes**.
+5. **SSH keys:** *Save the private key it offers* (or paste your own public
+   key). You need it to log in.
+6. **Create.** When it's **Running**, copy the **Public IP address** — call it
+   `<VPS_IP>`.
+
+### 2. Open the ports in Oracle's cloud firewall (VCN)
+
+This is the layer people miss — it is separate from the OS firewall the
+installer handles.
+
+1. On the instance page, click the **Virtual Cloud Network** link → **Security
+   Lists** → the **Default Security List**.
+2. **Add Ingress Rules** (Add Ingress Rule, twice):
+
+   | Stateless | Source CIDR | IP Protocol | Destination Port |
+   |---|---|---|---|
+   | No | `0.0.0.0/0` | TCP | `443` |
+   | No | `0.0.0.0/0` | TCP | `80` |
+
+   (443 is the proxy; 80 is only for the TLS certificate challenge + renewals.)
+
+### 3. Point your domain at the box (Cloudflare)
+
+1. Cloudflare dashboard → your domain (`codescriet.dev`) → **DNS → Records →
+   Add record**:
+
+   | Type | Name | IPv4 address | Proxy status |
+   |---|---|---|---|
+   | A | `vpn` | `<VPS_IP>` | **DNS only (grey cloud)** |
+
+2. **The cloud must be grey, not orange.** Grey = direct connection = best ping
+   and full-duplex unlimited up/down, and it is *required* for the certificate
+   step to succeed. (Orange/proxied also works but adds ~200–400 ms — only use
+   it as a fallback; see *Cloudflare modes* below.)
+3. Give DNS a minute. From your laptop, `nslookup vpn.codescriet.dev` should
+   return `<VPS_IP>` (not a `104.*`/`172.*` Cloudflare address).
+
+### 4. Log in to the box
+
+```bash
+chmod 600 /path/to/your-private-key.key
+ssh -i /path/to/your-private-key.key ubuntu@<VPS_IP>
+```
+
+(The default user is `ubuntu` on Ubuntu images, `opc` on Oracle Linux.)
+
+### 5. Run the one-command installer
+
+```bash
+sudo apt update && sudo apt install -y git
+git clone https://github.com/beingdev01/ccsu-bypass.git
+cd ccsu-bypass
+bash setup.sh
+```
+
+It re-runs itself with `sudo` and then, on its own: installs everything,
+confirms `vpn.codescriet.dev` points at this box, opens the OS firewall, gets
+the Let's Encrypt certificate, applies the low-latency tuning, generates **one
+UUID per device** (it asks how many — default 8), writes `/etc/xray/config.json`,
+starts the `xray` service, installs the self-healing watchdog, and finally
+prints a **share link + QR code for each device** and saves them to
+`credentials.txt`.
+
+Just press **Enter** at each prompt to accept the defaults (domain
+`vpn.codescriet.dev`, port 443, path `/cdn`, 8 devices). If DNS isn't ready it
+will show you the exact record to add and wait.
+
+When it finishes you'll see, per device:
+
+```
+vless://<uuid>@vpn.codescriet.dev:443?encryption=none&security=tls&sni=vpn.codescriet.dev&fp=chrome&type=ws&host=vpn.codescriet.dev&path=%2Fcdn#CCSU-dev1
+```
+
+### 6. Connect a device
+
+- **Android** — install **v2rayNG** → `+` → *Import config from clipboard*
+  (paste one device's link) → tap the connect button.
+- **iPhone** — **Hiddify** or **V2Box** → *Add from clipboard*.
+- **Windows** — **v2rayN** → *Import from clipboard*.
+- **Mac / Linux** — `brew install sing-box`, then on the VPS run
+  `DOMAIN=vpn.codescriet.dev UUID=<one-uuid> npm run client` to get a
+  `client-singbox.json`, copy it over, `sing-box run -c client-singbox.json`,
+  and set your system SOCKS5 proxy to `127.0.0.1:2080`.
+
+Give each device a **different** link from `credentials.txt`.
+
+### 7. Verify it's working
+
+On the VPS: `npm run doctor` (checks service, cert, ports, WS upgrade).
+From your laptop on the campus network: `DOMAIN=vpn.codescriet.dev
+VPS_IP=<VPS_IP> ./doctor.sh` walks the whole path and the **first failing check
+is the real problem.** To see your actual ping floor, run `latency-check.sh`
+from the laptop (see *Latency* below).
+
+That's the whole thing. Everything past here is reference and tuning.
+
+---
+
 ## What's in here
 
 | File | Purpose |
@@ -35,20 +151,11 @@ can point it at any record you control.
 
 ---
 
-## Deploy — one command
+## Deploy — one command (quick reference)
 
-Two things can't be done from inside the box (they're in web consoles), so do
-them first:
-
-1. **Cloudflare DNS** — add `A` record `vpn` → *your VPS public IP*, set to
-   **DNS only (grey cloud)**. Grey = direct = best ping + full-duplex unlimited
-   up/down. (The installer checks this for you and won't proceed until the
-   record points at the VPS.)
-2. **Oracle VCN Security List / NSG** — add **Ingress** rules from `0.0.0.0/0`
-   for TCP **443** and TCP **80** (80 is only for the cert challenge/renewals).
-   The installer handles the *OS* firewall itself; this VCN layer is separate.
-
-Then, on the VPS:
+The full click-by-click version is the **walkthrough** above. In short: create
+an A record `vpn → <VPS_IP>` (grey cloud) in Cloudflare, add Oracle VCN ingress
+rules for TCP 443 + 80, then on the box:
 
 ```bash
 git clone https://github.com/beingdev01/ccsu-bypass.git
@@ -56,26 +163,23 @@ cd ccsu-bypass
 bash setup.sh          # re-runs itself with sudo; asks for anything it needs
 ```
 
-That's it. The installer:
+That's it. The installer re-execs with `sudo` and then, on its own: installs
+every dependency (`curl`, `certbot`, `xray`, `qrencode`, …); prompts for
+domain / port / path / device-count (just press Enter for defaults) and
+**generates one UUID per device**; auto-detects the public IP and **verifies DNS
+points at it** (looping with the exact record to add until it does); opens
+ports 80 + the TLS port in the host firewall; obtains the Let's Encrypt
+certificate; applies the low-latency tuning (BBR + `fq`, `tcpNoDelay`, buffer
+sizing); writes `/etc/xray/config.json`; installs the systemd service, the
+cert-renewal hook, and the self-healing watchdog; self-tests; and saves a
+**share link + QR code per device** to `credentials.txt`.
 
-- re-execs with `sudo`, installs every dependency (`curl`, `certbot`, `xray`,
-  `qrencode`, …),
-- **prompts** for domain / port / path (sensible defaults — just press Enter)
-  and **auto-generates your UUID**,
-- **auto-detects the public IP** and **verifies DNS** points at it (loops with
-  the exact record to create until it does),
-- opens ports 80 + the TLS port in the host firewall,
-- obtains the Let's Encrypt certificate,
-- applies the low-latency tuning (BBR + `fq`, `tcpNoDelay`, buffer sizing),
-- writes `/etc/xray/config.json`, installs the systemd service, and installs the
-  cert-renewal hook,
-- self-tests, saves everything to `credentials.txt`, and prints the **share
-  link + a scannable QR code**.
-
-Fully non-interactive (e.g. for automation) — pass everything as env vars:
+Fully non-interactive (automation) — pass everything as env vars:
 
 ```bash
-sudo DOMAIN=vpn.codescriet.dev UUID=$(cat /proc/sys/kernel/random/uuid) bash setup.sh
+sudo DOMAIN=vpn.codescriet.dev DEVICES=8 bash setup.sh
+# or supply your own UUIDs:
+sudo DOMAIN=vpn.codescriet.dev UUIDS=uuid1,uuid2,uuid3 bash setup.sh
 ```
 
 Oracle "Always Free" boxes are fine — the 1 GB `E2.1.Micro` (AMD) or an ARM
@@ -120,7 +224,7 @@ vless://<uuid>@vpn.codescriet.dev:443?encryption=none&security=tls&sni=vpn.codes
 | | DNS only (grey) | Proxied (orange) |
 |---|---|---|
 | DNS returns | your VPS IP | a Cloudflare IP |
-| Latency | ~60 ms (direct) | ~200–400 ms (CDN hop) |
+| Latency | your raw RTT + ~1 ms (direct) | +200–400 ms (CDN hop) |
 | Upload | full | throttled |
 | What the firewall sees | Chrome → an unknown-but-valid HTTPS site | Chrome → Cloudflare (very high-trust) |
 | Best for | **gaming / low latency** | maximum stealth on aggressive DPI |
