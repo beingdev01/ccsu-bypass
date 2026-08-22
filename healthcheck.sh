@@ -32,25 +32,44 @@ if ! /usr/local/bin/xray -test -config /etc/xray/config.json >/dev/null 2>&1; th
   log "WARN config rejected by xray -test"
 fi
 
-# 3. does it actually answer a WebSocket upgrade locally?
+# 3. Does it actually answer a WebSocket upgrade locally?
 #    --resolve to 127.0.0.1 avoids Oracle hairpin-NAT false negatives.
-CODE="$(curl -sk --max-time 8 --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
-        -o /dev/null -w '%{http_code}' \
-        -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-        -H "Sec-WebSocket-Key: $(head -c 16 /dev/urandom | base64)" \
-        -H 'Sec-WebSocket-Version: 13' \
-        "https://${DOMAIN}:${PORT}${WS_PATH}" 2>/dev/null || echo 000)"
-CODE="${CODE: -3}"
-if [ "$CODE" != "101" ]; then
-  # one grace retry — could be a transient reload
-  sleep 3
-  CODE2="$(curl -sk --max-time 8 --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
-          -o /dev/null -w '%{http_code}' \
-          -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-          -H "Sec-WebSocket-Key: $(head -c 16 /dev/urandom | base64)" \
-          -H 'Sec-WebSocket-Version: 13' \
-          "https://${DOMAIN}:${PORT}${WS_PATH}" 2>/dev/null || echo 000)"
-  [ "${CODE2: -3}" != "101" ] && restart "ws upgrade returned ${CODE}/${CODE2}, expected 101"
+#
+#    STABILITY: a restart kills every live connection on every device, so this
+#    must never fire on a blip. A busy or CPU-starved box can miss a probe
+#    without being broken at all. We therefore require STRIKES consecutive
+#    failures (~3 checks = ~9 min of genuine outage) and use a generous
+#    timeout. A single success resets the counter.
+STRIKES="${HEAL_STRIKES:-3}"
+STATE="${HEAL_STATE:-/run/ccsu-heal.fails}"
+probe(){
+  curl -sk --max-time 15 --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
+       -o /dev/null -w '%{http_code}' \
+       -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+       -H "Sec-WebSocket-Key: $(head -c 16 /dev/urandom | base64)" \
+       -H 'Sec-WebSocket-Version: 13' \
+       "https://${DOMAIN}:${PORT}${WS_PATH}" 2>/dev/null || true
+}
+CODE="$(probe)"; CODE="${CODE: -3}"
+if [ "$CODE" = "101" ]; then
+  # healthy — clear any accumulated strikes
+  [ -f "$STATE" ] && rm -f "$STATE"
+else
+  sleep 5
+  CODE2="$(probe)"; CODE2="${CODE2: -3}"
+  if [ "$CODE2" = "101" ]; then
+    rm -f "$STATE"
+    log "probe blip (${CODE}) recovered on retry — NOT restarting"
+  else
+    FAILS=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
+    echo "$FAILS" > "$STATE" 2>/dev/null || true
+    if [ "$FAILS" -ge "$STRIKES" ]; then
+      rm -f "$STATE"
+      restart "ws upgrade failed ${FAILS} consecutive checks (last ${CODE}/${CODE2})"
+    else
+      log "ws probe failed (${CODE}/${CODE2}) strike ${FAILS}/${STRIKES} — holding, not restarting"
+    fi
+  fi
 fi
 
 # 4. certificate health: renew if within 10 days, then reload.

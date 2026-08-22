@@ -83,13 +83,17 @@ const config = {
         //   TCP Fast Open is deliberately NOT used: Chrome disabled it by
         //     default, so it would make us LESS browser-like, and some
         //     middleboxes drop SYN packets carrying payload.
-        sockopt: { tcpCongestion: 'bbr' }
+        // STABILITY: keepalive probes stop NAT/firewall state from silently
+        // expiring on an idle tunnel. Without these, a connection that has been
+        // quiet for a few minutes looks alive to the client but is already dead
+        // in the middlebox — which surfaces as a mid-session drop.
+        sockopt: { tcpCongestion: 'bbr', tcpKeepAliveIdle: 30, tcpKeepAliveInterval: 10 }
       }
     }
   ],
   outbounds: [
     // Same congestion control on the VPS<->destination leg.
-    { protocol: 'freedom', tag: 'direct', streamSettings: { sockopt: { tcpCongestion: 'bbr' } } },
+    { protocol: 'freedom', tag: 'direct', streamSettings: { sockopt: { tcpCongestion: 'bbr', tcpKeepAliveIdle: 30, tcpKeepAliveInterval: 10 } } },
     { protocol: 'blackhole', tag: 'block' }
   ]
 };

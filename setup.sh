@@ -282,12 +282,12 @@ cat > /etc/xray/config.json <<JSON
           ]
         },
         "wsSettings": { "path": "${WS_PATH}" },
-        "sockopt": { "tcpCongestion": "bbr" }
+        "sockopt": { "tcpCongestion": "bbr", "tcpKeepAliveIdle": 30, "tcpKeepAliveInterval": 10 }
       }
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct", "streamSettings": { "sockopt": { "tcpCongestion": "bbr" } } },
+    { "protocol": "freedom", "tag": "direct", "streamSettings": { "sockopt": { "tcpCongestion": "bbr", "tcpKeepAliveIdle": 30, "tcpKeepAliveInterval": 10 } } },
     { "protocol": "blackhole", "tag": "block" }
   ]
 }
