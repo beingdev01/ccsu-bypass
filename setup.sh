@@ -235,16 +235,26 @@ ok "xray -> $(/usr/local/bin/xray version 2>/dev/null | head -n1)"
 info "Applying low-latency network tuning (BBR, fq, buffers)..."
 modprobe tcp_bbr 2>/dev/null || true
 echo 'tcp_bbr' > /etc/modules-load.d/bbr.conf 2>/dev/null || true
-cat > /etc/sysctl.d/99-ccsu-latency.conf <<'SYSCTL'
-net.core.default_qdisc=fq
+# Pick the best available AQM: fq_codel actively holds queue LATENCY down,
+# where plain fq only paces. Availability varies by kernel, so probe it.
+QD=""
+for q in cake fq_codel fq; do
+  if tc qdisc add dev lo root $q 2>/dev/null; then tc qdisc del dev lo root 2>/dev/null; QD="$q"; break; fi
+done
+[ -z "$QD" ] && QD="pfifo_fast"
+cat > /etc/sysctl.d/99-ccsu-latency.conf <<SYSCTL
+# Latency-first tuning. Buffers are deliberately MODEST: oversized buffers are
+# what let queues grow into seconds of delay (bufferbloat), which shows up as
+# ping climbing the longer a connection stays open.
+net.core.default_qdisc=${QD}
 net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_max=4194304
+net.core.wmem_max=4194304
+net.ipv4.tcp_rmem=4096 87380 4194304
+net.ipv4.tcp_wmem=4096 65536 4194304
+net.ipv4.tcp_notsent_lowat=131072
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
-net.ipv4.tcp_notsent_lowat=16384
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
-net.ipv4.tcp_rmem=4096 131072 16777216
-net.ipv4.tcp_wmem=4096 131072 16777216
 SYSCTL
 sysctl --system >/dev/null 2>&1 || true
 ok "congestion control: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
