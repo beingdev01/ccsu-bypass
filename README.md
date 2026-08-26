@@ -151,6 +151,7 @@ That's the whole thing. Everything past here is reference and tuning.
 | `tune-latency.sh` | Fixes bufferbloat (latency that grows on long connections): right-sizes buffers, switches to an AQM qdisc, verifies each setting took. |
 | `bufferbloat-test.sh` | Measures latency **idle vs under load** from a client — the number that decides whether calls and gaming are usable. |
 | `udp-probe.sh` | Tests whether UDP/443 reaches the VPS through the campus firewall. Decides whether a QUIC/H3 transport is viable. |
+| `add-quic.sh` | Adds an **XHTTP/HTTP-3 (QUIC over UDP)** inbound alongside the existing WebSocket one — real UDP datagrams for calls and games. Idempotent, auto-rollback. |
 | `ROADMAP.md` | Scoping for a UDP transport, and an honest look at where efficiency actually comes from (spoiler: not a rewrite). |
 | `TESTING.md` | Isolated-lab test report: DPI/fingerprint, security, latency, 8-device concurrency, and the vulnerabilities found. |
 

@@ -37,6 +37,16 @@ const WS_PATH = process.env.WS_PATH || '/cdn';
 const SOCKS   = parseInt(process.env.SOCKS_PORT || '2080', 10);
 const PIN_IP  = process.env.PIN_IP || '';          // optional: dial IP, SNI stays DOMAIN
 
+// MODE=ws   (default) VLESS over WebSocket over TLS over TCP. Proven, works
+//           everywhere, but carries your UDP inside TCP — so a lost packet
+//           stalls everything behind it (head-of-line blocking). That is what
+//           makes WhatsApp calls and games stutter.
+// MODE=quic VLESS over XHTTP/HTTP-3 over QUIC over UDP. Carries UDP as real
+//           datagrams: a lost packet stays lost instead of freezing the stream.
+//           Requires the server to have run add-quic.sh, and UDP/443 to reach
+//           it (check with udp-probe.sh first).
+const MODE = (process.env.MODE || 'ws').toLowerCase();
+
 if (UUID === '49189805-e1ed-4627-820a-806adb82c169') {
   console.warn('[warn] Using the built-in default UUID — it is PUBLIC (it is in git).');
   console.warn('[warn] Pass the UUID that setup.sh generated: UUID=... npm run client\n');
@@ -47,10 +57,13 @@ if (UUID === '49189805-e1ed-4627-820a-806adb82c169') {
 const dialTarget = PIN_IP || DOMAIN;
 
 const encPath = WS_PATH.replace(/\//g, '%2F');
-const link =
-  `vless://${UUID}@${dialTarget}:${PORT}` +
-  `?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome` +
-  `&type=ws&host=${DOMAIN}&path=${encPath}#CCSU-Bypass`;
+const link = MODE === 'quic'
+  ? `vless://${UUID}@${dialTarget}:${PORT}` +
+    `?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&alpn=h3` +
+    `&type=xhttp&mode=auto&host=${DOMAIN}&path=${encPath}#CCSU-QUIC`
+  : `vless://${UUID}@${dialTarget}:${PORT}` +
+    `?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome` +
+    `&type=ws&host=${DOMAIN}&path=${encPath}#CCSU-Bypass`;
 
 const singbox = {
   log: { level: 'warn' },
@@ -96,9 +109,13 @@ const singbox = {
       tls: {
         enabled: true,
         server_name: DOMAIN,
+        // QUIC mandates TLS 1.3 and negotiates ALPN h3.
+        ...(MODE === 'quic' ? { alpn: ['h3'], min_version: '1.3' } : {}),
         utls: { enabled: true, fingerprint: 'chrome' }
       },
-      transport: { type: 'ws', path: WS_PATH, headers: { Host: DOMAIN } }
+      ...(MODE === 'quic'
+        ? { transport: { type: 'http', path: WS_PATH, host: [DOMAIN] } }
+        : { transport: { type: 'ws', path: WS_PATH, headers: { Host: DOMAIN } } })
     },
     { type: 'direct', tag: 'direct' }
   ],
@@ -122,6 +139,11 @@ console.log('  ' + link + '\n');
 if (PIN_IP) {
   console.log(`  [pinned] dialing ${PIN_IP} directly, SNI/Host = ${DOMAIN}`);
   console.log('  Use this variant if DNS for your domain is blocked or poisoned.\n');
+}
+console.log(`transport: ${MODE === 'quic' ? 'XHTTP/H3 over QUIC (UDP) — real datagrams for calls/games' : 'WebSocket over TCP (proven default)'}`);
+if (MODE !== 'quic') {
+  console.log('  for lag-free calls/games try: MODE=quic npm run client');
+  console.log('  (server must have run add-quic.sh first)');
 }
 console.log('sing-box config written to: client-singbox.json');
 console.log('  run:   sing-box run -c client-singbox.json');
