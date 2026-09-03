@@ -313,14 +313,17 @@ Description=Xray VLESS+WS+TLS (ccsu-bypass)
 # network-online (not just network.target) so the cert/DNS are usable at boot.
 After=network-online.target
 Wants=network-online.target
+# Don't hammer forever on a broken config/cert — surface the failure instead.
+# These MUST live in [Unit]: they moved out of [Service] in systemd 229, and
+# systemd silently ignores them there ("Unknown key name ... in section
+# 'Service', ignoring"), which left Restart=always with no limit at all.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json
 Restart=always
 RestartSec=3
-# Don't hammer forever on a broken config/cert — surface the failure instead.
-StartLimitIntervalSec=300
-StartLimitBurst=10
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 LimitNOFILE=1048576
