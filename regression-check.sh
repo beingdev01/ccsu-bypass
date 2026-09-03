@@ -68,9 +68,25 @@ printf "  %-26s %s\n" "net.core.wmem_max"        "$WMEM"
 printf "  %-26s %s\n" "tcp_notsent_lowat"        "$LOWAT"
 printf "  %-26s %s\n" "default_qdisc"            "$QD"
 printf "  %-26s %s\n" "live qdisc on ${IFACE:-?}" "${LIVEQ:-?}"
+# Compare against the EXACT values tune-latency.sh writes. A threshold test
+# would call the kernel default "fine" — it is not oversized, but it is also
+# not the fix, and that distinction is the whole point of this check.
+WANT_MEM=4194304
+WANT_LOWAT=131072
 APPLIED=yes
-[ "$WMEM"  -gt 8000000 ] 2>/dev/null && { APPLIED=no; bad "buffers are still OVERSIZED (${WMEM}) — this is the bufferbloat"; }
-[ "$LOWAT" -gt 1000000 ] 2>/dev/null && { APPLIED=no; bad "tcp_notsent_lowat still at the kernel default — no cap on queued data"; }
+if [ "$WMEM" != "$WANT_MEM" ]; then
+  APPLIED=no
+  if [ "${WMEM:-0}" -gt 8000000 ] 2>/dev/null; then
+    bad "buffers are still OVERSIZED (${WMEM}) — this IS the bufferbloat"
+  else
+    bad "wmem_max is ${WMEM}, not the tuned ${WANT_MEM} — tuning was never applied here"
+  fi
+fi
+# The kernel default is UINT_MAX (printed 4294967295), i.e. no cap at all.
+if [ "$LOWAT" != "$WANT_LOWAT" ]; then
+  APPLIED=no
+  bad "tcp_notsent_lowat is ${LOWAT}, not ${WANT_LOWAT} — no cap on queued data"
+fi
 case "$LIVEQ" in fq_codel|cake) ;; *) APPLIED=no; warn "live qdisc is '${LIVEQ:-none}' — no active queue management";; esac
 if [ "$APPLIED" = yes ]; then
   ok "bufferbloat tuning is live"
