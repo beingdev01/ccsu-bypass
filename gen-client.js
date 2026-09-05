@@ -194,7 +194,32 @@ const xrayClient = {
       ...(MUX ? { mux: { enabled: true, concurrency: 8, xudpConcurrency: 8, xudpProxyUDP443: 'skip' } } : {})
     },
     { protocol: 'freedom', tag: 'direct' }
-  ]
+  ],
+
+  // ROUTING. Without this block Xray sends EVERYTHING to the first outbound,
+  // which means your router, printers, NAS and any local dev server get
+  // tunnelled to the VPS and back. Verified in the lab: with no routing rules
+  // a request to 127.0.0.1 crossed the tunnel.
+  //
+  // domainStrategy stays 'AsIs' deliberately. 'IPIfNonMatch' would resolve
+  // every destination locally before routing it, which is exactly the DNS leak
+  // Sophos inspects. Keeping AsIs means LAN hosts addressed by IP route
+  // correctly while no lookup ever escapes the tunnel. A LAN host addressed by
+  // *name* still goes through the tunnel; that is the deliberate trade.
+  routing: {
+    domainStrategy: 'AsIs',
+    rules: [
+      // Never tunnel the connection to the VPS through itself.
+      { type: 'field', domain: [`full:${DOMAIN}`], outboundTag: 'direct' },
+      ...(PIN_IP ? [{ type: 'field', ip: [`${PIN_IP}/32`], outboundTag: 'direct' }] : []),
+      // Loopback, LAN and link-local, as literal CIDRs: 'geoip:private' would
+      // need geoip.dat on disk, and this needs no data file at all.
+      { type: 'field', outboundTag: 'direct', ip: [
+        '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+        '169.254.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10'
+      ] }
+    ]
+  }
 };
 
 fs.writeFileSync('client-xray.json', JSON.stringify(xrayClient, null, 2));

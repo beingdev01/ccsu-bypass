@@ -4,5 +4,6 @@ xray.zip
 config.json
 credentials.txt
 client-singbox.json
+client-xray.json
 *.pem
 node_modules/

@@ -259,6 +259,30 @@ SYSCTL
 sysctl --system >/dev/null 2>&1 || true
 ok "congestion control: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
 
+# ---- 8b. pick the outbound DNS strategy based on real IPv6 reachability -----
+# Default "AsIs" hands the hostname to Go's dialer, which races A and AAAA and
+# gives IPv6 a 300ms head start. Correct on a box with working IPv6; on a box
+# without it, every cold connection to a dual-stack site waits 300ms for an
+# attempt that cannot succeed. Measure rather than assume — forcing IPv4 on a
+# box that HAS working IPv6 would throw away real connectivity.
+DOMAIN_STRATEGY=""
+if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+  if timeout 6 python3 - <<'V6' 2>/dev/null
+import socket,sys
+try:
+    s=socket.socket(socket.AF_INET6, socket.SOCK_STREAM); s.settimeout(5)
+    s.connect(("2606:4700:4700::1111", 443)); s.close(); sys.exit(0)
+except Exception: sys.exit(1)
+V6
+  then ok "IPv6 works — leaving domainStrategy at the AsIs default"
+  else DOMAIN_STRATEGY="UseIPv4"; warn "IPv6 address present but unreachable — setting domainStrategy=UseIPv4"; fi
+else
+  DOMAIN_STRATEGY="UseIPv4"; info "no global IPv6 on this box — setting domainStrategy=UseIPv4"
+fi
+# Rendered into the freedom outbound below (empty string = omit the key).
+FREEDOM_SETTINGS=""
+[ -n "$DOMAIN_STRATEGY" ] && FREEDOM_SETTINGS="\"settings\": { \"domainStrategy\": \"${DOMAIN_STRATEGY}\" }, "
+
 # ---- 9. write the server config ---------------------------------------------
 info "Writing /etc/xray/config.json ..."
 mkdir -p /etc/xray
@@ -297,7 +321,7 @@ cat > /etc/xray/config.json <<JSON
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct", "streamSettings": { "sockopt": { "tcpCongestion": "bbr", "tcpKeepAliveIdle": 30, "tcpKeepAliveInterval": 10 } } },
+    { "protocol": "freedom", "tag": "direct", ${FREEDOM_SETTINGS}"streamSettings": { "sockopt": { "tcpCongestion": "bbr", "tcpKeepAliveIdle": 30, "tcpKeepAliveInterval": 10 } } },
     { "protocol": "blackhole", "tag": "block" }
   ]
 }
