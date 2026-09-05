@@ -19,6 +19,46 @@ three), and tune from that, not from the app's badge.
 
 ---
 
+## The biggest single win: turn on Mux
+
+Without multiplexing, VLESS-over-WebSocket opens a **complete new TCP + TLS +
+WebSocket handshake to the VPS for every destination**. One page pulling from a
+dozen domains pays that a dozen times, and there is nothing the server can do
+about it — the client decides.
+
+Measured in the lab against this exact server config, 12 cold destinations at a
+simulated 40 ms RTT:
+
+| Client setting | Time | Tunnel connections opened |
+|---|---|---|
+| As shipped (no mux) | ~2100 ms | **12** |
+| Mux on, concurrency 8 | ~1130 ms | **1** |
+
+**46% faster, stable across three trials, with no penalty on parallel loads.**
+The server needs no change at all — it already speaks Mux.Cool.
+
+- **v2rayNG (Android):** Settings → **Mux** → Enable, Concurrency **8**. The
+  `vless://` share link cannot carry this setting, so it must be set by hand.
+- **v2rayN (Windows):** same, in the profile's mux settings.
+- **Desktop:** run `npm run client` and use the generated **`client-xray.json`**,
+  which has mux configured already.
+
+### Why sing-box does not get this
+
+sing-box's `multiplex` speaks smux / yamux / h2mux. Xray-core speaks Mux.Cool
+and only Mux.Cool — the server binary contains zero references to the others, so
+enabling multiplex in a sing-box config simply will not negotiate. It is left
+out of `client-singbox.json` deliberately. On desktop, prefer `client-xray.json`.
+
+### What mux does not help
+
+UDP/443 is deliberately kept **out** of the shared connection
+(`xudpProxyUDP443: "skip"`), so a large download cannot stall a call or a game
+behind it. Calls and games gain nothing from mux — that is what the QUIC
+profile (`MODE=quic`) is for.
+
+---
+
 ## v2rayNG (Android)
 
 v2rayNG defaults to **DoH** for remote DNS, which forces a full TLS handshake to

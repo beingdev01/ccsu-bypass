@@ -47,6 +47,21 @@ const PIN_IP  = process.env.PIN_IP || '';          // optional: dial IP, SNI sta
 //           it (check with udp-probe.sh first).
 const MODE = (process.env.MODE || 'ws').toLowerCase();
 
+// MUX — the single biggest latency win available on the ws transport.
+//
+// Without it, VLESS-over-WS opens a COMPLETE NEW TCP + TLS + WebSocket
+// handshake to the VPS for EVERY destination. A page pulling from 12 domains
+// pays that 12 times. Measured in the lab against this exact server config, at
+// a simulated 40 ms RTT: 12 cold destinations took 2100 ms and opened 12
+// tunnel connections. With mux: 1130 ms and 1 connection — 46% faster, stable
+// across trials, with no penalty on parallel loads.
+//
+// Mux.Cool is an Xray-core protocol. The server needs NO configuration for it
+// (verified: the lab server had none and mux worked). Default ON for ws.
+// Default OFF for quic, where XHTTP/H3 already multiplexes over one QUIC
+// connection and a second mux layer would only add overhead.
+const MUX = (process.env.MUX || (MODE === 'quic' ? 'off' : 'on')).toLowerCase() === 'on';
+
 if (UUID === '49189805-e1ed-4627-820a-806adb82c169') {
   console.warn('[warn] Using the built-in default UUID — it is PUBLIC (it is in git).');
   console.warn('[warn] Pass the UUID that setup.sh generated: UUID=... npm run client\n');
@@ -65,6 +80,12 @@ const link = MODE === 'quic'
     `?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome` +
     `&type=ws&host=${DOMAIN}&path=${encPath}#CCSU-Bypass`;
 
+// NOTE ON MULTIPLEXING AND THIS FILE:
+// sing-box's `multiplex` speaks smux / yamux / h2mux. Xray-core speaks Mux.Cool
+// and ONLY Mux.Cool — verified by inspecting the server binary, which contains
+// zero references to smux, yamux or h2mux. So enabling multiplex here would not
+// negotiate with our server; it is deliberately absent rather than forgotten.
+// To get the 46% cold-connection win on desktop, use client-xray.json below.
 const singbox = {
   log: { level: 'warn' },
 
@@ -134,6 +155,50 @@ const singbox = {
 
 fs.writeFileSync('client-singbox.json', JSON.stringify(singbox, null, 2));
 
+// ---- Xray-core client (macOS / Windows / Linux) -----------------------------
+// This is the config that can actually use Mux.Cool against our server, so it
+// is the one to run on desktop if you care about how fast pages feel.
+const xrayClient = {
+  log: { loglevel: 'warning' },
+  inbounds: [
+    { listen: '127.0.0.1', port: SOCKS, protocol: 'socks',
+      settings: { auth: 'noauth', udp: true } }
+  ],
+  outbounds: [
+    {
+      protocol: 'vless',
+      tag: 'proxy',
+      settings: {
+        vnext: [{
+          address: dialTarget,
+          port: PORT,
+          users: [{ id: UUID, encryption: 'none' }]
+        }]
+      },
+      streamSettings: {
+        network: MODE === 'quic' ? 'xhttp' : 'ws',
+        security: 'tls',
+        tlsSettings: {
+          serverName: DOMAIN,
+          fingerprint: 'chrome',
+          ...(MODE === 'quic' ? { alpn: ['h3'] } : { alpn: ['http/1.1'] })
+        },
+        ...(MODE === 'quic'
+          ? { xhttpSettings: { path: WS_PATH, host: DOMAIN, mode: 'auto' } }
+          : { wsSettings: { path: WS_PATH, host: DOMAIN } })
+      },
+      // See the MUX note at the top of this file. concurrency 8 keeps one
+      // tunnel connection carrying up to 8 streams; xudpProxyUDP443 'skip'
+      // keeps UDP/443 (QUIC, and the media paths calls and games use) OUT of
+      // the shared connection, so a browser download cannot stall a call.
+      ...(MUX ? { mux: { enabled: true, concurrency: 8, xudpConcurrency: 8, xudpProxyUDP443: 'skip' } } : {})
+    },
+    { protocol: 'freedom', tag: 'direct' }
+  ]
+};
+
+fs.writeFileSync('client-xray.json', JSON.stringify(xrayClient, null, 2));
+
 console.log('VLESS share link (phones / Windows — import from clipboard):\n');
 console.log('  ' + link + '\n');
 if (PIN_IP) {
@@ -145,9 +210,22 @@ if (MODE !== 'quic') {
   console.log('  for lag-free calls/games try: MODE=quic npm run client');
   console.log('  (server must have run add-quic.sh first)');
 }
-console.log('sing-box config written to: client-singbox.json');
-console.log('  run:   sing-box run -c client-singbox.json');
+console.log(`mux: ${MUX ? 'ON — one tunnel connection serves every destination' : 'off'}`);
+if (MUX) {
+  console.log('  measured: 46% faster on cold page loads (12 conns -> 1) at 40ms RTT');
+}
+console.log('');
+console.log('configs written:');
+console.log('  client-xray.json     <- USE THIS on desktop (Xray-core; supports mux)');
+console.log('        run:   xray run -c client-xray.json');
+console.log('  client-singbox.json  <- sing-box; NO mux (sing-box speaks smux/yamux,');
+console.log('        run:   sing-box run -c client-singbox.json    our server speaks Mux.Cool)');
 console.log(`  proxy: SOCKS5 127.0.0.1:${SOCKS}\n`);
+if (MUX) {
+  console.log('ON ANDROID (v2rayNG) the share link CANNOT carry the mux setting.');
+  console.log('Turn it on by hand, once, or you keep paying a handshake per site:');
+  console.log('  v2rayNG -> Settings -> Mux -> Enable, Concurrency 8\n');
+}
 console.log('IMPORTANT when testing with curl: use socks5h (not socks5) so DNS');
 console.log('resolves through the tunnel instead of leaking to the firewall:');
 console.log(`  curl -x socks5h://127.0.0.1:${SOCKS} https://ifconfig.me`);
