@@ -1,0 +1,8 @@
+/var/log/ccsu-heal.log {
+  weekly
+  rotate 4
+  compress
+  missingok
+  notifempty
+  copytruncate
+}

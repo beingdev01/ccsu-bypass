@@ -13,10 +13,30 @@
 # Everything it does is idempotent and safe to run on a timer.
 set -u
 
+cfg_val(){ # JSON read that survives a 2nd (QUIC) inbound; grep fallback below
+  python3 - /etc/xray/config.json "$1" <<'PY' 2>/dev/null || true
+import json,sys
+what=sys.argv[1]
+try:
+    c=json.load(open('/etc/xray/config.json')); ib=c['inbounds'][0]; ss=ib.get('streamSettings',{})
+    if what=='domain':
+        for cert in ss.get('tlsSettings',{}).get('certificates',[]):
+            f=cert.get('certificateFile','')
+            if '/etc/letsencrypt/live/' in f: print(f.split('/etc/letsencrypt/live/')[1].split('/')[0]); break
+    elif what=='port': print(ib.get('port',443))
+    elif what=='path':
+        print(ss.get('wsSettings',{}).get('path') or ss.get('xhttpSettings',{}).get('path','/cdn'))
+except Exception: pass
+PY
+}
+
+DOMAIN="${DOMAIN:-$(cfg_val domain)}"
 DOMAIN="${DOMAIN:-$(grep -o '/etc/letsencrypt/live/[^/]*' /etc/xray/config.json 2>/dev/null | head -1 | sed 's#.*/##')}"
 DOMAIN="${DOMAIN:-vpn.codescriet.dev}"
+PORT="${PORT:-$(cfg_val port)}"
 PORT="${PORT:-$(grep -o '"port"[[:space:]]*:[[:space:]]*[0-9]*' /etc/xray/config.json 2>/dev/null | head -1 | grep -o '[0-9]*')}"
 PORT="${PORT:-443}"
+WS_PATH="${WS_PATH:-$(cfg_val path)}"
 WS_PATH="${WS_PATH:-$(grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' /etc/xray/config.json 2>/dev/null | head -1 | sed 's/.*"\(\/[^"]*\)"/\1/')}"
 WS_PATH="${WS_PATH:-/cdn}"
 LOG="${HEAL_LOG:-/var/log/ccsu-heal.log}"
@@ -73,10 +93,11 @@ else
 fi
 
 # 4. certificate health: renew if within 10 days, then reload.
+# Scoped to our cert so an unrelated cert never triggers a proxy restart.
 CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 if [ -f "$CERT" ] && ! openssl x509 -checkend 864000 -noout -in "$CERT" >/dev/null 2>&1; then
-  log "cert expiring soon — renewing"
-  certbot renew --quiet >/dev/null 2>&1 && restart "post-renewal reload"
+  log "cert expiring soon — renewing ${DOMAIN}"
+  certbot renew --cert-name "${DOMAIN}" --quiet >/dev/null 2>&1 && restart "post-renewal reload"
 fi
 
 exit 0
