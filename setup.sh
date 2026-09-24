@@ -463,6 +463,11 @@ CRED="${APP_DIR}/credentials.txt"
   unset IFS
 } > "$CRED"
 chmod 600 "$CRED"
+# The installer runs as root, but the repo lives in the ubuntu user's home.
+# Without this the owner can't even read their own credentials/QR.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  chown "$SUDO_USER:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" "$CRED" 2>/dev/null || true
+fi
 
 # ---- 13. self-test ----------------------------------------------------------
 # Test against 127.0.0.1 via --resolve: hairpin NAT to our own public IP often
