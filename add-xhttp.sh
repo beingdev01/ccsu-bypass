@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
-# add-xhttp.sh — STAGED, not yet activated. Adds an XHTTP/H2 (TCP) inbound
-# ALONGSIDE WebSocket. Same pattern as add-quic.sh, but needs NO UDP, so it
-# works even where Sophos eats all UDP. WS is deprecated upstream; H2 muxes
-# better for browsing/text. Gaming neutral.
+# add-xhttp.sh — DISABLED BY DEFAULT. Verified live 2026-09-24: two TCP
+# inbounds (WS + XHTTP/H2) on the SAME port 443 clash — the WS handshake hits
+# the XHTTP handler and returns 404 (existing devices break). Unlike add-quic.sh
+# (QUIC binds UDP-only, no clash), XHTTP/H2 binds TCP and cannot share 443.
 #
-# NOT run automatically: activating restarts xray (~1s blip, drops live
-# calls/games). Run off-peak when ready:
-#   sudo ./add-xhttp.sh
+# Safe options: (a) stay on WS/443 — recommended, zero hassle; (b) XHTTP on a
+# SEPARATE TCP port (e.g. XHTTP_PORT=8443) with its own VCN+firewall rule and
+# new client links. This script therefore REFUSES same-port use. Pass an
+# explicit different port to proceed:
+#   sudo XHTTP_PORT=8443 ./add-xhttp.sh
 # Roll back: sudo cp <printed-backup> /etc/xray/config.json && sudo systemctl restart xray
 set -euo pipefail
 [ "$(id -u)" = 0 ] || exec sudo -E bash "$0" "$@"
@@ -21,19 +23,36 @@ echo "backup: $BACKUP"
 g=$'\033[1;32m'; y=$'\033[1;33m'; r=$'\033[1;31m'; z=$'\033[0m'
 ok(){ echo "${g}  ok${z} $*"; }; warn(){ echo "${y}  !!${z} $*"; }; bad(){ echo "${r} err${z} $*"; }
 
-python3 - "$CFG" <<'PY'
+BASE_PORT="$(python3 -c "import json;print(json.load(open('$CFG'))['inbounds'][0].get('port',443))" 2>/dev/null || echo 443)"
+HXPORT="${XHTTP_PORT:-}"
+if [ -z "$HXPORT" ]; then
+  bad "refusing: XHTTP on same TCP/${BASE_PORT} breaks WS (verified 404 live)."
+  echo "  Stay on WS/${BASE_PORT} (recommended), or re-run with a separate port:"
+  echo "    sudo XHTTP_PORT=8443 ./add-xhttp.sh   # + open VCN/firewall TCP/8443"
+  exit 1
+fi
+if [ "$HXPORT" = "$BASE_PORT" ]; then
+  bad "XHTTP_PORT (${HXPORT}) must differ from base port (${BASE_PORT})."
+  exit 1
+fi
+iptables -C INPUT -p tcp --dport "$HXPORT" -j ACCEPT 2>/dev/null || \
+  iptables -I INPUT -p tcp --dport "$HXPORT" -j ACCEPT
+BACKUP="/etc/xray/config.json.pre-xhttp.$(date +%s)"
+cp "$CFG" "$BACKUP"
+echo "backup: $BACKUP"
+
+python3 - "$CFG" "$HXPORT" <<'PY'
 import json,sys
-p=sys.argv[1]; c=json.load(open(p))
+p,hxport=sys.argv[1],int(sys.argv[2]); c=json.load(open(p))
 base=c['inbounds'][0]
 ss=base['streamSettings']
 tls=ss['tlsSettings']
-port=base.get('port',443)
 path=ss.get('wsSettings',{}).get('path') or ss.get('xhttpSettings',{}).get('path','/cdn')
 c['inbounds']=[i for i in c['inbounds'] if i.get('tag')!='xhttp-in']
 hx={
   "tag":"xhttp-in",
   "listen":"0.0.0.0",
-  "port":port,
+  "port":hxport,
   "protocol":"vless",
   "settings":{"clients":base['settings']['clients'],"decryption":"none"},
   "streamSettings":{
@@ -50,7 +69,7 @@ hx={
 }
 c['inbounds'].append(hx)
 json.dump(c,open(p,'w'),indent=2)
-print(f"  staged xhttp-in on TCP/{port}, path {path}")
+print(f"  staged xhttp-in on TCP/{hxport}, path {path}")
 PY
 
 if ! /usr/local/bin/xray -test -config "$CFG" >/dev/null 2>&1; then
