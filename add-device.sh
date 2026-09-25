@@ -72,7 +72,7 @@ PY
   add)
     NEW="$(cat /proc/sys/kernel/random/uuid)"
     BAK="$(backup_cfg)"; echo "backup: $BAK"
-    TMP="$(mktemp)"
+    TMP="$(mktemp --suffix=.json)"
     cp "$CFG" "$TMP"
     # Add to EVERY vless inbound (WS + QUIC if present) so transports never diverge.
     if ! python3 - "$TMP" "$NEW" "$NAME" <<'PY'; then
@@ -101,7 +101,7 @@ PY
   remove)
     [ -n "$TARGET" ] || { echo "--remove needs a UUID"; exit 1; }
     BAK="$(backup_cfg)"; echo "backup: $BAK"
-    TMP="$(mktemp)"
+    TMP="$(mktemp --suffix=.json)"
     cp "$CFG" "$TMP"
     python3 - "$TMP" "$TARGET" <<'PY'
 import json,sys
