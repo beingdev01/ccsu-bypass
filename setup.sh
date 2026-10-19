@@ -52,6 +52,7 @@ echo "----------------------------------------"
 
 # ---- 1. gather settings -----------------------------------------------------
 ask DOMAIN  "Domain for this proxy (must be a DNS record you control)" "vpn.codescriet.dev"
+ask EXTRA_DOMAINS "Extra SNI domains, comma-separated (alternate entry points added by add-domain.sh; their certs must already exist)" ""
 ask PORT    "TLS port"        "443"
 ask WS_PATH "WebSocket path"  "/cdn"
 APEX="${DOMAIN#*.}"
@@ -331,6 +332,26 @@ ids=[u.strip() for u in sys.argv[1].split(',') if u.strip()]
 print(','.join('{ "id": "%s" }' % u for u in ids))
 PY
 )"
+# Build the certificates[] JSON: primary domain + EXTRA_DOMAINS.
+# Re-runs must not drop alternate SNIs added by add-domain.sh, but a config
+# pointing at a missing cert would stop xray from starting, so only domains
+# with a live cert on disk are included (warn on the rest).
+ALL_DOMAINS="$DOMAIN"
+if [ -n "${EXTRA_DOMAINS:-}" ]; then ALL_DOMAINS="${ALL_DOMAINS},${EXTRA_DOMAINS}"; fi
+CERTS_JSON="$(python3 - "$ALL_DOMAINS" <<'PY'
+import sys,os
+ds=[d.strip() for d in sys.argv[1].split(',') if d.strip()]
+keep=[]
+for d in ds:
+    fp='/etc/letsencrypt/live/%s/fullchain.pem' % d
+    if os.path.isfile(fp):
+        keep.append(d)
+    else:
+        print(' !! skipping %s: no cert at ' % d + fp, file=sys.stderr)
+print(','.join('{ "certificateFile": "/etc/letsencrypt/live/%s/fullchain.pem",'
+               ' "keyFile": "/etc/letsencrypt/live/%s/privkey.pem" }' % (d,d) for d in keep))
+PY
+)"
 cat > /etc/xray/config.json <<JSON
 {
   "log": { "loglevel": "warning", "access": "none" },
@@ -346,12 +367,7 @@ cat > /etc/xray/config.json <<JSON
         "tlsSettings": {
           "alpn": ["http/1.1"],
           "minVersion": "1.2",
-          "certificates": [
-            {
-              "certificateFile": "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem",
-              "keyFile": "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
-            }
-          ]
+          "certificates": [ ${CERTS_JSON} ]
         },
         "wsSettings": { "path": "${WS_PATH}" },
         "sockopt": { "tcpCongestion": "bbr", "tcpKeepAliveIdle": 30, "tcpKeepAliveInterval": 10 }
