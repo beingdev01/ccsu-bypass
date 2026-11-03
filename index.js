@@ -129,12 +129,15 @@ function resolveXray() {
     if (fs.existsSync(p)) return p;
   }
   // Download into the config's directory (writable) or cwd.
+  // Version-pinned like setup.sh: `latest` is non-reproducible. Override with
+  // XRAY_VERSION=... only deliberately (verified: 26.3.27).
   const dir = fs.existsSync(path.dirname(cfgPath)) ? path.dirname(cfgPath) : __dirname;
   const asset = xrayAssetForArch();
-  const url = `https://github.com/XTLS/Xray-core/releases/latest/download/${asset}`;
-  console.log(`[..] downloading xray (${os.arch()}): ${url}`);
+  const ver = process.env.XRAY_VERSION || '26.3.27';
+  const url = `https://github.com/XTLS/Xray-core/releases/download/v${ver}/${asset}`;
+  console.log(`[..] downloading xray ${ver} (${os.arch()}): ${url}`);
   execSync(
-    `cd "${dir}" && curl -fsSL "${url}" -o xray.zip && unzip -o xray.zip xray && chmod +x xray`,
+    `cd "${dir}" && curl -fsSL --retry 3 --max-time 120 "${url}" -o xray.zip && unzip -o xray.zip xray && chmod +x xray`,
     { stdio: 'inherit' }
   );
   return path.join(dir, 'xray');

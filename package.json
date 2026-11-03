@@ -7,7 +7,13 @@
     "start": "node index.js",
     "client": "node gen-client.js",
     "doctor": "bash doctor.sh",
-    "add-device": "bash add-device.sh"
+    "add-device": "bash add-device.sh",
+    "regression": "bash regression-check.sh",
+    "tune": "bash tune-latency.sh",
+    "quic": "bash add-quic.sh",
+    "probe": "bash udp-probe.sh",
+    "latency": "bash latency-check.sh",
+    "bloat": "bash bufferbloat-test.sh"
   },
   "license": "MIT"
 }

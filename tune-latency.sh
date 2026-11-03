@@ -82,6 +82,30 @@ if [ -n "${IFACE:-}" ]; then
     || warn "could not set ${QDISC} on ${IFACE} (default still applies to new links)"
 fi
 
+# Persist across reboots (otherwise the next boot silently returns to pfifo_fast
+# while sysctl still claims cake/fq_codel — the exact live mismatch observed).
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "${APP_DIR}/apply-qdisc.sh" ]; then
+  install -m 0755 "${APP_DIR}/apply-qdisc.sh" /usr/local/bin/ccsu-apply-qdisc.sh 2>/dev/null \
+    || cp "${APP_DIR}/apply-qdisc.sh" /usr/local/bin/ccsu-apply-qdisc.sh
+  chmod +x /usr/local/bin/ccsu-apply-qdisc.sh
+  cat > /etc/systemd/system/ccsu-qdisc.service <<'UNIT'
+[Unit]
+Description=ccsu-bypass: apply latency qdisc to live interface
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ccsu-apply-qdisc.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable ccsu-qdisc.service >/dev/null 2>&1 || true
+  ok "qdisc persistence installed (ccsu-qdisc.service)"
+fi
+
 # --- VERIFY: never trust that a setting took ---------------------------------
 echo
 echo "=== AFTER (verified) ==="

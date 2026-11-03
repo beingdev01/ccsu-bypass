@@ -52,6 +52,7 @@ echo "----------------------------------------"
 
 # ---- 1. gather settings -----------------------------------------------------
 ask DOMAIN  "Domain for this proxy (must be a DNS record you control)" "vpn.codescriet.dev"
+ask EXTRA_DOMAINS "Extra SNI domains, comma-separated (alternate entry points added by add-domain.sh; their certs must already exist)" ""
 ask PORT    "TLS port"        "443"
 ask WS_PATH "WebSocket path"  "/cdn"
 APEX="${DOMAIN#*.}"
@@ -61,10 +62,40 @@ ask DEVICES "How many devices will connect (one credential each)" "8"
 # One UUID per device: a lost phone can be revoked without touching the others,
 # and per-device credentials keep flows attributable. UUID (single) still works;
 # UUIDS (comma list) is what the multi-device config is built from.
+#
+# RE-RUN SAFETY: re-running setup.sh must NEVER invalidate existing devices.
+# If UUIDS/UUID were not explicitly provided and a config already exists, reuse
+# its clients verbatim (covers both WS-only and WS+QUIC configs — clients are
+# identical across inbounds). Only generate fresh UUIDs on first install.
 if [ -n "${UUIDS:-}" ]; then
   ok "Using provided UUIDS (${UUIDS})"
 elif [ -n "${UUID:-}" ]; then
   UUIDS="$UUID"; ok "Using provided UUID: ${UUID}"
+elif [ -f /etc/xray/config.json ]; then
+  EXISTING="$(python3 - /etc/xray/config.json <<'PY' 2>/dev/null || true
+import json,sys
+try:
+    c=json.load(open(sys.argv[1]))
+    ids=[]
+    for ib in c.get('inbounds',[]):
+        for cl in ib.get('settings',{}).get('clients',[]):
+            i=cl.get('id','').strip()
+            if i and i not in ids: ids.append(i)
+    print(','.join(ids))
+except Exception:
+    pass
+PY
+)"
+  if [ -n "$EXISTING" ]; then
+    UUIDS="$EXISTING"
+    ok "Reusing $(printf '%s' "$UUIDS" | tr ',' '\n' | grep -c .) existing device UUID(s) from /etc/xray/config.json (nothing revoked)"
+  else
+    UUIDS=""
+    for i in $(seq 1 "${DEVICES:-1}"); do
+      UUIDS="${UUIDS:+$UUIDS,}$(cat /proc/sys/kernel/random/uuid)"
+    done
+    ok "Generated ${DEVICES} device UUID(s)"
+  fi
 else
   UUIDS=""
   for i in $(seq 1 "${DEVICES:-1}"); do
@@ -216,8 +247,13 @@ else
   ok "certificate issued"
 fi
 
-# ---- 7. install xray (arch-aware) -------------------------------------------
+# ---- 7. install xray (arch-aware, version-pinned) -----------------------------
+# Pinned by default for reproducibility: `latest` moves under you and a fresh
+# re-run could install an untested build. Override with XRAY_VERSION=... only
+# deliberately. Must match the build add-quic.sh / regression-check.sh were
+# verified against until you re-verify (currently 26.3.27).
 info "Installing xray..."
+XRAY_VERSION="${XRAY_VERSION:-26.3.27}"
 case "$(uname -m)" in
   x86_64|amd64)  ASSET="Xray-linux-64.zip" ;;
   aarch64|arm64) ASSET="Xray-linux-arm64-v8a.zip" ;;
@@ -225,11 +261,11 @@ case "$(uname -m)" in
   *) err "unsupported arch: $(uname -m)"; exit 1 ;;
 esac
 TMP="$(mktemp -d)"
-curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/${ASSET}" -o "${TMP}/xray.zip"
+curl -fsSL --retry 3 --max-time 120 "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/${ASSET}" -o "${TMP}/xray.zip"
 unzip -o "${TMP}/xray.zip" xray -d "${TMP}" >/dev/null
 install -m 0755 "${TMP}/xray" /usr/local/bin/xray
 rm -rf "$TMP"
-ok "xray -> $(/usr/local/bin/xray version 2>/dev/null | head -n1)"
+ok "xray ${XRAY_VERSION} -> $(/usr/local/bin/xray version 2>/dev/null | head -n1)"
 
 # ---- 8. low-latency kernel/network tuning -----------------------------------
 info "Applying low-latency network tuning (BBR, fq, buffers)..."
@@ -258,6 +294,33 @@ net.ipv4.tcp_mtu_probing=1
 SYSCTL
 sysctl --system >/dev/null 2>&1 || true
 ok "congestion control: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+
+# Persist the AQM qdisc across reboots: sysctl default_qdisc only applies to
+# NEW interfaces, so the live NIC must be set explicitly at boot as well.
+# (Live box showed sysctl=cake but enp0s6=pfifo_fast — this closes that gap.)
+install -m 0755 "${APP_DIR}/apply-qdisc.sh" /usr/local/bin/ccsu-apply-qdisc.sh 2>/dev/null \
+  || cp "${APP_DIR}/apply-qdisc.sh" /usr/local/bin/ccsu-apply-qdisc.sh
+chmod +x /usr/local/bin/ccsu-apply-qdisc.sh
+cat > /etc/systemd/system/ccsu-qdisc.service <<'UNIT'
+[Unit]
+Description=ccsu-bypass: apply latency qdisc to live interface
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ccsu-apply-qdisc.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable ccsu-qdisc.service >/dev/null 2>&1 || true
+/usr/local/bin/ccsu-apply-qdisc.sh 2>/dev/null || warn "live qdisc apply deferred to next boot"
+
+# Bound the watchdog log: healthcheck appends forever without this.
+install -m 0644 "${APP_DIR}/ccsu-heal.logrotate" /etc/logrotate.d/ccsu-heal 2>/dev/null \
+  || cp "${APP_DIR}/ccsu-heal.logrotate" /etc/logrotate.d/ccsu-heal || true
+ok "qdisc persistence + logrotate installed"
 
 # ---- 8b. pick the outbound DNS strategy based on real IPv6 reachability -----
 # Default "AsIs" hands the hostname to Go's dialer, which races A and AAAA and
@@ -293,6 +356,26 @@ ids=[u.strip() for u in sys.argv[1].split(',') if u.strip()]
 print(','.join('{ "id": "%s" }' % u for u in ids))
 PY
 )"
+# Build the certificates[] JSON: primary domain + EXTRA_DOMAINS.
+# Re-runs must not drop alternate SNIs added by add-domain.sh, but a config
+# pointing at a missing cert would stop xray from starting, so only domains
+# with a live cert on disk are included (warn on the rest).
+ALL_DOMAINS="$DOMAIN"
+if [ -n "${EXTRA_DOMAINS:-}" ]; then ALL_DOMAINS="${ALL_DOMAINS},${EXTRA_DOMAINS}"; fi
+CERTS_JSON="$(python3 - "$ALL_DOMAINS" <<'PY'
+import sys,os
+ds=[d.strip() for d in sys.argv[1].split(',') if d.strip()]
+keep=[]
+for d in ds:
+    fp='/etc/letsencrypt/live/%s/fullchain.pem' % d
+    if os.path.isfile(fp):
+        keep.append(d)
+    else:
+        print(' !! skipping %s: no cert at ' % d + fp, file=sys.stderr)
+print(','.join('{ "certificateFile": "/etc/letsencrypt/live/%s/fullchain.pem",'
+               ' "keyFile": "/etc/letsencrypt/live/%s/privkey.pem" }' % (d,d) for d in keep))
+PY
+)"
 cat > /etc/xray/config.json <<JSON
 {
   "log": { "loglevel": "warning", "access": "none" },
@@ -308,12 +391,7 @@ cat > /etc/xray/config.json <<JSON
         "tlsSettings": {
           "alpn": ["http/1.1"],
           "minVersion": "1.2",
-          "certificates": [
-            {
-              "certificateFile": "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem",
-              "keyFile": "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
-            }
-          ]
+          "certificates": [ ${CERTS_JSON} ]
         },
         "wsSettings": { "path": "${WS_PATH}" },
         "sockopt": { "tcpCongestion": "bbr", "tcpKeepAliveIdle": 30, "tcpKeepAliveInterval": 10 }
@@ -425,6 +503,11 @@ CRED="${APP_DIR}/credentials.txt"
   unset IFS
 } > "$CRED"
 chmod 600 "$CRED"
+# The installer runs as root, but the repo lives in the ubuntu user's home.
+# Without this the owner can't even read their own credentials/QR.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  chown "$SUDO_USER:$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")" "$CRED" 2>/dev/null || true
+fi
 
 # ---- 13. self-test ----------------------------------------------------------
 # Test against 127.0.0.1 via --resolve: hairpin NAT to our own public IP often

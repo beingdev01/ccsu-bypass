@@ -317,6 +317,7 @@ actually behaves. Fixed items are already in the code.
 | **Cryptic certbot failure** | The #1 real-world blocker is a missing Oracle VCN ingress rule on port 80, which certbot reports as an opaque challenge error. | Failure now prints the four actual causes, ranked. |
 | **Weak self-test** | A `400` only proves TLS works, not that the WebSocket path is right — a path typo passed the old test and failed at connect time. | Now performs a real WS upgrade and requires `101`. |
 | **DNS leak / DNS-level blocking** | Sophos intercepts DNS at the gateway. With traffic tunnelled but DNS local, it still sees every domain you visit and can block sites at the DNS layer. | Client resolves DNS **inside the tunnel** (`detour: proxy`). See below. |
+| **SNI-based filtering (TLS handshake `i/o timeout`)** | A middlebox lets TCP/443 connect, then drops the TLS handshake once it sees a blocklisted SNI. On the server this looks like bursts of `http: TLS handshake error from <client-ip>:...: read tcp ...: i/o timeout` while the open internet handshakes fine. | `./add-domain.sh <new-domain>`: provisions a fresh, innocuous-looking domain with its own Let's Encrypt cert (DNS-01, no downtime) and serves it on the same :443 — Xray picks the cert by ClientHello SNI. Clients switch SNI; device UUIDs are never touched. |
 | **Boot ordering** | `network.target` fires before the network is usable; xray could restart-loop at boot. | Unit uses `network-online.target` plus a start-limit. |
 
 ### The DNS fix, specifically
@@ -341,6 +342,22 @@ so it still looks like ordinary HTTPS and needs no lookup at all:
 ```bash
 PIN_IP=<your-vps-ip> DOMAIN=vpn.codescriet.dev UUID=<uuid> npm run client
 ```
+
+### If the SNI itself is blocked
+
+DNS tricks don't help when the filter keys on the Server Name Indication: the
+TCP connection opens, then the handshake stalls and the client retries in a
+tight loop (server logs fill with `TLS handshake error ... i/o timeout` from
+your IP). The counter is a new, unlisted SNI on the same server:
+
+```bash
+sudo ./add-domain.sh static.codescriet.dev   # DNS record + cert + xray, UUIDs untouched
+DOMAIN=static.codescriet.dev UUID=<uuid> npm run client   # regenerate the client config
+```
+
+Both domains stay live on :443, so old clients keep working. A re-run of
+`setup.sh` preserves alternate SNIs via `EXTRA_DOMAINS` (comma-separated);
+each listed domain keeps its cert entry as long as the cert exists on disk.
 
 ### Known limits — worth understanding
 
